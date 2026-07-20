@@ -9,6 +9,7 @@ pub mod pdf_cleanup;
 pub mod placeholder_oz;
 pub mod price_cleanup;
 pub mod priced_export;
+pub mod provisional_xml;
 pub mod reference_cleanup;
 #[path = "parser_v2.rs"]
 pub mod parser;
@@ -18,6 +19,7 @@ pub use inline_png::inject_pdf_pngs;
 pub use model::{BillOfQuantities, Node, Position};
 pub use parser::parse_text;
 pub use priced_export::{write_x83_priced, write_x84};
+pub use provisional_xml::apply_provisional_flags;
 
 pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
     let path = path.as_ref();
