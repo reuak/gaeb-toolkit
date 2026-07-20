@@ -1,0 +1,20 @@
+[package]
+name = "gaeb-toolkit"
+version = "0.1.0"
+edition = "2021"
+description = "Parse German construction bills of quantities from PDF into structured data"
+license = "MIT"
+repository = "https://github.com/reuak/gaeb-toolkit"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+quick-xml = { version = "0.37", features = ["serialize"] }
+regex = "1"
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+
+[dev-dependencies]
+pretty_assertions = "1"
