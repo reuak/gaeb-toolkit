@@ -1,8 +1,12 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use gaeb_toolkit::{
+    apply_provisional_flags,
     export::{write_json, write_master_xml},
     inject_pdf_pngs, parse_pdf, write_x83, write_x83_priced, write_x84,
 };
@@ -60,6 +64,7 @@ fn main() -> Result<()> {
             if let Some(path) = x83 {
                 write_x83(&boq, &path, allow_conflicts)?;
                 embed_images(&input, &path, &boq, "X83")?;
+                apply_provisional(&path, &boq, "X83")?;
             }
 
             match (x84, x83_priced) {
@@ -69,16 +74,19 @@ fn main() -> Result<()> {
                     // zusätzliche X83 angepasst. Das spart einen pdftohtml-Lauf.
                     write_x84(&boq, &x84_path, allow_conflicts)?;
                     embed_images(&input, &x84_path, &boq, "X84")?;
+                    apply_provisional(&x84_path, &boq, "X84")?;
                     derive_priced_x83(&x84_path, &x83_path)?;
                     eprintln!("X83 mit Preisen aus der X84 abgeleitet.");
                 }
                 (Some(path), None) => {
                     write_x84(&boq, &path, allow_conflicts)?;
                     embed_images(&input, &path, &boq, "X84")?;
+                    apply_provisional(&path, &boq, "X84")?;
                 }
                 (None, Some(path)) => {
                     write_x83_priced(&boq, &path, allow_conflicts)?;
                     embed_images(&input, &path, &boq, "X83 mit Preisen")?;
+                    apply_provisional(&path, &boq, "X83 mit Preisen")?;
                 }
                 (None, None) => {}
             }
@@ -105,6 +113,18 @@ fn embed_images(
     let image_count = inject_pdf_pngs(input, output, boq)?;
     if image_count > 0 {
         eprintln!("{image_count} PNG-Abbildung(en) inline in die {label} eingebettet.");
+    }
+    Ok(())
+}
+
+fn apply_provisional(
+    output: &Path,
+    boq: &gaeb_toolkit::BillOfQuantities,
+    label: &str,
+) -> Result<()> {
+    let count = apply_provisional_flags(output, boq)?;
+    if count > 0 {
+        eprintln!("{count} Eventualposition(en) in der {label} als 'WithoutTotal' markiert.");
     }
     Ok(())
 }
