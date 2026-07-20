@@ -4,6 +4,7 @@ pub mod export;
 pub mod inline_png;
 pub mod model;
 pub mod pdf_cleanup;
+pub mod reference_cleanup;
 #[path = "parser_v2.rs"]
 pub mod parser;
 pub mod x83;
@@ -16,6 +17,7 @@ pub use x83::{write_x83, x83_conflicts};
 pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
     let path = path.as_ref();
     let mut boq = parser::parse_pdf(path)?;
+    reference_cleanup::repair_split_references(&mut boq);
     pdf_cleanup::postprocess_pdf(path, &mut boq)?;
     Ok(boq)
 }
