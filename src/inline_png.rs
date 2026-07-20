@@ -339,7 +339,7 @@ fn inject_into_item(item_xml: &str, images: &[&InlinePng]) -> String {
         return result;
     }
 
-    if let Some(index) = item_xml.find("<OutlineText>") {
+    if let Some(index) = item_xml.find("<OutlineText") {
         let detail = format!(
             "        <DetailTxt>\n          <Text>\n{blocks}          </Text>\n        </DetailTxt>\n        "
         );
