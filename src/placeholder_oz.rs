@@ -23,7 +23,16 @@ pub fn recover_placeholder_positions(path: &Path, boq: &mut BillOfQuantities) ->
     }
 
     let text = String::from_utf8(output.stdout).context("PDF-Text ist nicht UTF-8")?;
-    recover_from_text(&text, boq)
+    recover_placeholder_positions_from_text(&text, boq)
+}
+
+/// Nutzt bereits extrahierten `pdftotext -layout`-Text, damit dieselbe PDF im
+/// normalen Parse-Ablauf nicht ein zweites Mal von Poppler gelesen werden muss.
+pub(crate) fn recover_placeholder_positions_from_text(
+    text: &str,
+    boq: &mut BillOfQuantities,
+) -> Result<usize> {
+    recover_from_text(text, boq)
 }
 
 fn recover_from_text(text: &str, boq: &mut BillOfQuantities) -> Result<usize> {
@@ -108,12 +117,7 @@ fn recover_from_text(text: &str, boq: &mut BillOfQuantities) -> Result<usize> {
         count += 1;
     }
 
-    // Nachträglich erkannte Platzhalter-OZ wurden bisher nur angehängt und
-    // erschienen deshalb am Ende des LV. Hier wird die komplette Hierarchie
-    // numerisch sortiert; `__` ist bereits als `00` normalisiert und steht damit
-    // vor `01`, `02`, ... innerhalb desselben Titels.
     sort_hierarchy(&mut boq.roots);
-
     Ok(count)
 }
 
