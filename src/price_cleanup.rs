@@ -2,8 +2,6 @@ use rust_decimal::Decimal;
 
 use crate::model::{BillOfQuantities, Node, Position};
 
-const PRICE_TOLERANCE: Decimal = Decimal::new(2, 2);
-
 /// Prüft Menge × EP gegen den Gesamtpreis und repariert eindeutige Parserfehler.
 ///
 /// Regeln:
@@ -104,7 +102,7 @@ fn money(value: Decimal) -> Decimal {
 }
 
 fn close(left: Decimal, right: Decimal) -> bool {
-    (left - right).abs() <= PRICE_TOLERANCE
+    (left - right).abs() <= Decimal::new(2, 2)
 }
 
 fn decimal_text(value: Decimal) -> String {
