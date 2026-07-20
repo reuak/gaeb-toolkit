@@ -51,7 +51,7 @@ fn main() -> Result<()> {
             }
             if let Some(path) = x83 {
                 write_x83(&boq, &path, allow_conflicts)?;
-                let image_count = inject_pdf_pngs(&input, &path)?;
+                let image_count = inject_pdf_pngs(&input, &path, &boq)?;
                 if image_count > 0 {
                     eprintln!("{image_count} PNG-Abbildung(en) inline in die X83 eingebettet.");
                 }
