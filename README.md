@@ -1,39 +1,51 @@
 # GAEB Toolkit
 
-Werkzeug zum Extrahieren und Strukturieren von Leistungsverzeichnissen aus PDF-Dateien.
+Rust-Werkzeug zum Extrahieren und Strukturieren deutscher Leistungsverzeichnisse aus PDF-Dateien.
 
-## Aktueller Stand
+## Funktionen
 
-Der erste Parser erkennt NOVA-ähnliche LV-PDFs mit folgender OZ-Hierarchie:
+- erkennt die OZ-Hierarchie `AA`, `AA.BB`, `AA.BB.CC`, `AA.BB.CC.DDD`
+- extrahiert Menge, Einheit, Einheitspreis und Gesamtbetrag
+- übernimmt Kurztext, Langtext, Seitenbezug und Eventualpositionen
+- prüft doppelte OZ und rechnerische Preisabweichungen
+- exportiert eine Master-XML und JSON
 
-- `AA` – Bereich
-- `AA.BB` – Titel
-- `AA.BB.CC` – Untertitel
-- `AA.BB.CC.DDD` – Position
+## Voraussetzungen
 
-Er extrahiert Text, Mengen, Einheiten, Einheitspreise, Gesamtbeträge, Eventualpositionen und Seitenreferenzen. Die Ausgabe erfolgt zunächst als strukturierte JSON- oder Master-XML-Datei. Ein GAEB-X83-Exporter ist als nächster Schritt vorgesehen.
+- Rust Toolchain
+- Poppler mit dem Programm `pdftotext`
 
-## Installation
+macOS:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e .
+brew install rust poppler
+```
+
+Ubuntu/Debian:
+
+```bash
+sudo apt install cargo rustc poppler-utils
+```
+
+Windows: Rust über `rustup` installieren und Poppler in `PATH` aufnehmen.
+
+## Bauen und testen
+
+```bash
+cargo build --release
+cargo test
 ```
 
 ## Verwendung
 
 ```bash
-gaeb-toolkit parse angebot.pdf --xml output.xml --json output.json
+cargo run --release -- parse angebot.pdf \
+  --xml angebot.master.xml \
+  --json angebot.json
 ```
 
-## Entwicklung
+Nach dem Release-Build liegt das Programm unter `target/release/gaeb-toolkit`.
 
-```bash
-pip install -e ".[dev]"
-pytest
-```
+## Aktueller Stand
 
-## Hinweis
-
-PDF-Dateien sind Layoutformate. Die Extraktion wird daher validiert und protokolliert; eine spätere GAEB-X83-Ausgabe sollte zusätzlich mit einem GAEB-Prüfwerkzeug geprüft werden.
+Der Parser ist auf NOVA-ähnliche LV-Ausdrucke ausgerichtet. PDF ist ein Layoutformat; deshalb werden nicht eindeutig erkennbare oder rechnerisch auffällige Positionen als Warnungen ausgegeben. Der geplante GAEB-X83-Exporter wird auf dem strukturierten Datenmodell aufbauen.
