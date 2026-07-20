@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::{path::Path, process::Command};
+
+use anyhow::{bail, Context};
 
 pub mod export;
 pub mod inline_png;
@@ -16,8 +18,29 @@ pub use parser::parse_text;
 
 pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
     let path = path.as_ref();
-    let mut boq = parser::parse_pdf(path)?;
-    placeholder_oz::recover_placeholder_positions(path, &mut boq)?;
+
+    // Der Layouttext wird vom Hauptparser und von der Platzhalter-OZ-Erkennung
+    // benötigt. Früher wurde dieselbe PDF dafür zweimal mit pdftotext gelesen.
+    let output = Command::new("pdftotext")
+        .args(["-layout", path.to_string_lossy().as_ref(), "-"])
+        .output()
+        .with_context(|| "pdftotext konnte nicht gestartet werden; bitte Poppler installieren")?;
+
+    if !output.status.success() {
+        bail!(
+            "pdftotext ist fehlgeschlagen: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let text = String::from_utf8(output.stdout).context("PDF-Text ist nicht UTF-8")?;
+    let source = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("input.pdf");
+
+    let mut boq = parser::parse_text(source, &text)?;
+    placeholder_oz::recover_placeholder_positions_from_text(&text, &mut boq)?;
     reference_cleanup::repair_split_references(&mut boq);
     pdf_cleanup::postprocess_pdf(path, &mut boq)?;
     Ok(boq)
