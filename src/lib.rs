@@ -12,6 +12,7 @@ pub mod priced_export;
 pub mod provisional_validation;
 pub mod provisional_xml;
 pub mod reference_cleanup;
+pub mod title_cleanup;
 #[path = "parser_v2.rs"]
 pub mod parser;
 pub mod x83;
@@ -50,6 +51,7 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
     placeholder_oz::recover_placeholder_positions_from_text(&text, &mut boq)?;
     reference_cleanup::repair_split_references(&mut boq);
     pdf_cleanup::postprocess_pdf(path, &mut boq)?;
+    title_cleanup::clean_titles(&mut boq.roots);
     price_cleanup::validate_and_repair_prices(&mut boq);
     provisional_validation::validate_provisional_totals(&text, &mut boq);
     Ok(boq)
