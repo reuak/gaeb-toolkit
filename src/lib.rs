@@ -9,6 +9,7 @@ pub mod pdf_cleanup;
 pub mod placeholder_oz;
 pub mod price_cleanup;
 pub mod priced_export;
+pub mod provisional_validation;
 pub mod provisional_xml;
 pub mod reference_cleanup;
 #[path = "parser_v2.rs"]
@@ -24,8 +25,9 @@ pub use provisional_xml::apply_provisional_flags;
 pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
     let path = path.as_ref();
 
-    // Der Layouttext wird vom Hauptparser und von der Platzhalter-OZ-Erkennung
-    // benötigt. Früher wurde dieselbe PDF dafür zweimal mit pdftotext gelesen.
+    // Der Layouttext wird vom Hauptparser, von der Platzhalter-OZ-Erkennung und
+    // von der Summenprüfung gemeinsam genutzt. Es entsteht kein weiterer
+    // pdftotext-/Poppler-Durchlauf.
     let output = Command::new("pdftotext")
         .args(["-layout", path.to_string_lossy().as_ref(), "-"])
         .output()
@@ -49,6 +51,7 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
     reference_cleanup::repair_split_references(&mut boq);
     pdf_cleanup::postprocess_pdf(path, &mut boq)?;
     price_cleanup::validate_and_repair_prices(&mut boq);
+    provisional_validation::validate_provisional_totals(&text, &mut boq);
     Ok(boq)
 }
 
