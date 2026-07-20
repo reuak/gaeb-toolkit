@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs::File, io::BufWriter, path::Path};
+use std::{collections::HashSet, fs::File, io::BufWriter, path::Path, sync::LazyLock};
 
 use anyhow::{bail, Result};
 use chrono::Local;
@@ -6,10 +6,16 @@ use quick_xml::{
     events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event},
     Writer,
 };
+use regex::Regex;
 
 use crate::model::{BillOfQuantities, Node, Position};
 
 const NS: &str = "http://www.gaeb.de/GAEB_DA_XML/DA83/3.3";
+
+static TRAILING_TOTAL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\s+(?:Summe\s+)?[\d.]+,\d{2}(?:\s*(?:€|EUR))?\s*$")
+        .expect("valid trailing total regex")
+});
 
 /// Writes a GAEB DA XML 3.3 (Ausgabe 2021-05) Angebotsaufforderung.
 ///
@@ -160,7 +166,8 @@ fn write_category<W: std::io::Write>(
     start.push_attribute(("RNoPart", rno));
     writer.write_event(Event::Start(start))?;
 
-    write_rich_text(writer, "LblTx", &node.title)?;
+    let clean_title = strip_trailing_totals(&node.title);
+    write_rich_text(writer, "LblTx", &clean_title)?;
     writer.write_event(Event::Start(BytesStart::new("BoQBody")))?;
 
     for child in &node.children {
@@ -178,6 +185,18 @@ fn write_category<W: std::io::Write>(
     writer.write_event(Event::End(BytesEnd::new("BoQBody")))?;
     writer.write_event(Event::End(BytesEnd::new("BoQCtgy")))?;
     Ok(())
+}
+
+fn strip_trailing_totals(value: &str) -> String {
+    let mut result = value.trim().to_owned();
+    loop {
+        let cleaned = TRAILING_TOTAL_RE.replace(&result, "").trim().to_owned();
+        if cleaned == result {
+            break;
+        }
+        result = cleaned;
+    }
+    result
 }
 
 fn write_item<W: std::io::Write>(
@@ -338,6 +357,19 @@ mod tests {
         assert!(xml.contains("RNoPart=\"040\""));
         assert!(xml.contains("<Qty>12.5</Qty>"));
         assert!(!xml.contains("<UP>"));
+    }
+
+    #[test]
+    fn removes_totals_from_category_labels() {
+        assert_eq!(
+            strip_trailing_totals("Rückbauarbeiten 123.456,78 €"),
+            "Rückbauarbeiten"
+        );
+        assert_eq!(
+            strip_trailing_totals("Schutzmaßnahmen 1.000,00 EUR 2.000,00 €"),
+            "Schutzmaßnahmen"
+        );
+        assert_eq!(strip_trailing_totals("Titel 2026"), "Titel 2026");
     }
 
     #[test]
