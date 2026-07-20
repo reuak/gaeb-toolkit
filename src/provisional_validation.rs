@@ -259,7 +259,7 @@ fn matching_subset(
     let singles = candidates
         .iter()
         .enumerate()
-        .filter(|(_, (_, value))| close(**value, required))
+        .filter(|(_, (_, value))| close(*value, required))
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     (singles.len() == 1).then(|| vec![singles[0]])
