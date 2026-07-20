@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gaeb-toolkit"
+version = "0.1.0"
+description = "Parse German construction bills of quantities from PDF into structured data."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "reuak" }]
+dependencies = [
+  "pdfplumber>=0.11,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "ruff>=0.5,<1",
+]
+
+[project.scripts]
+gaeb-toolkit = "gaeb_toolkit.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gaeb_toolkit"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
