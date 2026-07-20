@@ -2,6 +2,7 @@ use std::path::Path;
 
 pub mod export;
 pub mod inline_png;
+pub mod layout_reference_cleanup;
 pub mod model;
 pub mod pdf_cleanup;
 pub mod placeholder_oz;
@@ -20,6 +21,7 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
     let mut boq = parser::parse_pdf(path)?;
     placeholder_oz::recover_placeholder_positions(path, &mut boq)?;
     reference_cleanup::repair_split_references(&mut boq);
+    layout_reference_cleanup::repair_indented_references(path, &mut boq)?;
     pdf_cleanup::postprocess_pdf(path, &mut boq)?;
     Ok(boq)
 }
