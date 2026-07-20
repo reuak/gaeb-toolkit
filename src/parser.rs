@@ -1,10 +1,12 @@
-use std::{path::Path, process::Command, str::FromStr};
+use std::{collections::HashMap, path::Path, process::Command, str::FromStr};
 
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use rust_decimal::Decimal;
 
 use crate::model::{BillOfQuantities, Node, Position};
+
+type HeadingMap = HashMap<String, (String, usize)>;
 
 pub fn parse_pdf(path: impl AsRef<Path>) -> Result<BillOfQuantities> {
     let path = path.as_ref();
@@ -37,6 +39,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     let footer_re = Regex::new(r"^Druckausgabe vom:.*\d+\s*/\s*\d+\s*$")?;
 
     let mut boq = BillOfQuantities::new(source);
+    let mut headings = HeadingMap::new();
     let mut current_position: Option<Position> = None;
     let mut position_lines = Vec::<String>::new();
     let mut preamble_lines = Vec::<String>::new();
@@ -52,7 +55,13 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
             }
 
             if let Some(caps) = position_re.captures(&line) {
-                finish_position(&mut boq, &mut current_position, &mut position_lines, page_number);
+                finish_position(
+                    &mut boq,
+                    &headings,
+                    &mut current_position,
+                    &mut position_lines,
+                    page_number,
+                );
                 current_position = Some(Position {
                     oz: caps["oz"].to_owned(),
                     quantity: parse_decimal(caps.name("qty").map(|v| v.as_str())),
@@ -68,19 +77,33 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
             }
 
             if let Some(caps) = heading_re.captures(&line) {
-                finish_position(&mut boq, &mut current_position, &mut position_lines, page_number);
-                let oz = caps["oz"].to_owned();
-                ensure_hierarchy(
-                    &mut boq.roots,
-                    &oz,
-                    caps.name("title").map(|v| v.as_str()).unwrap_or_default(),
+                finish_position(
+                    &mut boq,
+                    &headings,
+                    &mut current_position,
+                    &mut position_lines,
                     page_number,
+                );
+                headings.insert(
+                    caps["oz"].to_owned(),
+                    (
+                        caps.name("title")
+                            .map(|v| v.as_str().trim().to_owned())
+                            .unwrap_or_default(),
+                        page_number,
+                    ),
                 );
                 continue;
             }
 
             if sum_re.is_match(&line) {
-                finish_position(&mut boq, &mut current_position, &mut position_lines, page_number);
+                finish_position(
+                    &mut boq,
+                    &headings,
+                    &mut current_position,
+                    &mut position_lines,
+                    page_number,
+                );
                 continue;
             }
 
@@ -100,8 +123,15 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
         }
     }
 
-    finish_position(&mut boq, &mut current_position, &mut position_lines, 0);
+    finish_position(
+        &mut boq,
+        &headings,
+        &mut current_position,
+        &mut position_lines,
+        0,
+    );
     boq.preamble = preamble_lines.join("\n").trim().to_owned();
+    apply_heading_titles(&mut boq.roots, &headings);
     validate(&mut boq);
     Ok(boq)
 }
@@ -153,6 +183,7 @@ fn extract_metadata(boq: &mut BillOfQuantities, page: &str) {
 
 fn finish_position(
     boq: &mut BillOfQuantities,
+    headings: &HeadingMap,
     current: &mut Option<Position>,
     lines: &mut Vec<String>,
     page_to: usize,
@@ -171,45 +202,49 @@ fn finish_position(
     }
     lines.clear();
 
-    let parent_oz = position
+    let hierarchy_oz = position
         .oz
         .split('.')
         .take(3)
         .collect::<Vec<_>>()
         .join(".");
-    let parent = ensure_hierarchy(
+    let parent = ensure_hierarchy_from_position(
         &mut boq.roots,
-        &parent_oz,
-        "",
+        &hierarchy_oz,
+        headings,
         position.page_from.unwrap_or_default(),
     );
     parent.positions.push(position);
 }
 
-fn ensure_hierarchy<'a>(roots: &'a mut Vec<Node>, oz: &str, title: &str, page: usize) -> &'a mut Node {
-    let parts = oz.split('.').collect::<Vec<_>>();
-    ensure_path(roots, &parts, 0, title, page)
+fn ensure_hierarchy_from_position<'a>(
+    roots: &'a mut Vec<Node>,
+    hierarchy_oz: &str,
+    headings: &HeadingMap,
+    fallback_page: usize,
+) -> &'a mut Node {
+    let parts = hierarchy_oz.split('.').collect::<Vec<_>>();
+    ensure_path(roots, &parts, 0, headings, fallback_page)
 }
 
 fn ensure_path<'a>(
     nodes: &'a mut Vec<Node>,
     parts: &[&str],
     index: usize,
-    final_title: &str,
-    page: usize,
+    headings: &HeadingMap,
+    fallback_page: usize,
 ) -> &'a mut Node {
     let current_oz = parts[..=index].join(".");
-    let position = nodes.iter().position(|node| node.oz == current_oz);
-    let node_index = match position {
+    let heading = headings.get(&current_oz);
+    let title = heading.map(|(title, _)| title.clone()).unwrap_or_default();
+    let page = heading.map(|(_, page)| *page).unwrap_or(fallback_page);
+
+    let node_index = match nodes.iter().position(|node| node.oz == current_oz) {
         Some(value) => value,
         None => {
             nodes.push(Node {
                 oz: current_oz,
-                title: if index + 1 == parts.len() {
-                    final_title.to_owned()
-                } else {
-                    String::new()
-                },
+                title,
                 level: index + 1,
                 page: Some(page),
                 children: Vec::new(),
@@ -219,10 +254,14 @@ fn ensure_path<'a>(
         }
     };
 
-    if index + 1 == parts.len() {
-        if nodes[node_index].title.is_empty() && !final_title.is_empty() {
-            nodes[node_index].title = final_title.to_owned();
+    if nodes[node_index].title.is_empty() {
+        if let Some((title, heading_page)) = heading {
+            nodes[node_index].title = title.clone();
+            nodes[node_index].page = Some(*heading_page);
         }
+    }
+
+    if index + 1 == parts.len() {
         return &mut nodes[node_index];
     }
 
@@ -230,9 +269,19 @@ fn ensure_path<'a>(
         &mut nodes[node_index].children,
         parts,
         index + 1,
-        final_title,
-        page,
+        headings,
+        fallback_page,
     )
+}
+
+fn apply_heading_titles(nodes: &mut [Node], headings: &HeadingMap) {
+    for node in nodes {
+        if let Some((title, page)) = headings.get(&node.oz) {
+            node.title = title.clone();
+            node.page = Some(*page);
+        }
+        apply_heading_titles(&mut node.children, headings);
+    }
 }
 
 fn validate(boq: &mut BillOfQuantities) {
@@ -281,11 +330,26 @@ mod tests {
     }
 
     #[test]
-    fn builds_oz_hierarchy() {
+    fn builds_hierarchy_from_position_oz() {
         let text = "01 Logistik\n01.01 Vorbereitung\n01.01.02 Schutz\n01.01.02.030 361,000 qm 3,50 € 1.263,50 €\nBoden schützen\n";
         let boq = parse_text("test.txt", text).unwrap();
+        assert_eq!(boq.roots.len(), 1);
         assert_eq!(boq.roots[0].oz, "01");
+        assert_eq!(boq.roots[0].title, "Logistik");
+        assert_eq!(boq.roots[0].children[0].oz, "01.01");
+        assert_eq!(boq.roots[0].children[0].title, "Vorbereitung");
+        assert_eq!(boq.roots[0].children[0].children[0].oz, "01.01.02");
         assert_eq!(boq.roots[0].children[0].children[0].title, "Schutz");
         assert_eq!(boq.roots[0].children[0].children[0].positions[0].oz, "01.01.02.030");
+    }
+
+    #[test]
+    fn ignores_unreferenced_headings() {
+        let text = "01 Verwaister Bereich\n02.03.04.010 1,000 St 5,00 € 5,00 €\nPosition\n";
+        let boq = parse_text("test.txt", text).unwrap();
+        assert_eq!(boq.roots.len(), 1);
+        assert_eq!(boq.roots[0].oz, "02");
+        assert_eq!(boq.roots[0].children[0].oz, "02.03");
+        assert_eq!(boq.roots[0].children[0].children[0].oz, "02.03.04");
     }
 }
