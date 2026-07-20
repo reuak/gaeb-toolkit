@@ -1,12 +1,15 @@
 use std::{
-    collections::BTreeSet,
     fs,
+    io::Cursor,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use image::{ImageFormat, ImageReader};
+use quick_xml::escape::unescape;
+use regex::Regex;
 use tempfile::tempdir;
 
 use crate::model::{BillOfQuantities, Node, Position};
@@ -14,27 +17,36 @@ use crate::model::{BillOfQuantities, Node, Position};
 #[derive(Debug, Clone)]
 struct InlinePng {
     page: usize,
+    top: i32,
     width: u32,
     data: String,
+    target_oz: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct PositionRef {
+    oz: String,
     page_from: usize,
     page_to: usize,
 }
 
-/// Extracts raster images from the source PDF and places each image in the
-/// GAEB Item whose parsed PDF page range contains the image page.
+#[derive(Debug, Clone)]
+struct TextMarker {
+    top: i32,
+    oz: String,
+}
+
+/// Extracts positioned PDF images with Poppler's `pdftohtml` and embeds each
+/// image in the GAEB item belonging to the nearest preceding OZ on that page.
 ///
-/// The item order is identical to the X83 writer order. Images are inserted
-/// into `DetailTxt/Text`; they are no longer collected in the global AddText.
+/// If a page does not repeat the OZ, the parser's page range is used as a
+/// conservative fallback. No images are added to the global AddText block.
 pub fn inject_pdf_pngs(
     pdf_path: impl AsRef<Path>,
     x83_path: impl AsRef<Path>,
     boq: &BillOfQuantities,
 ) -> Result<usize> {
-    let images = extract_pdf_pngs(pdf_path.as_ref())?;
+    let images = extract_positioned_pngs(pdf_path.as_ref())?;
     if images.is_empty() {
         return Ok(0);
     }
@@ -72,122 +84,196 @@ fn position_ref(position: &Position) -> PositionRef {
     let from = position.page_from.unwrap_or(1);
     let to = position.page_to.unwrap_or(from).max(from);
     PositionRef {
+        oz: position.oz.clone(),
         page_from: from,
         page_to: to,
     }
 }
 
-fn best_position_index(page: usize, positions: &[PositionRef]) -> Option<usize> {
+fn best_position_index(image: &InlinePng, positions: &[PositionRef]) -> Option<usize> {
+    if let Some(target_oz) = image.target_oz.as_deref() {
+        if let Some(index) = positions
+            .iter()
+            .enumerate()
+            .filter(|(_, position)| {
+                position.oz == target_oz
+                    && position.page_from <= image.page
+                    && image.page <= position.page_to
+            })
+            .min_by_key(|(index, position)| {
+                let span = position.page_to - position.page_from;
+                (span, usize::MAX - position.page_from, *index)
+            })
+            .map(|(index, _)| index)
+        {
+            return Some(index);
+        }
+
+        if let Some(index) = positions
+            .iter()
+            .enumerate()
+            .find(|(_, position)| position.oz == target_oz)
+            .map(|(index, _)| index)
+        {
+            return Some(index);
+        }
+    }
+
     positions
         .iter()
         .enumerate()
-        .filter(|(_, position)| position.page_from <= page && page <= position.page_to)
+        .filter(|(_, position)| {
+            position.page_from <= image.page && image.page <= position.page_to
+        })
         .min_by_key(|(index, position)| {
             let span = position.page_to - position.page_from;
-            // Engster Seitenbereich zuerst. Bei Gleichstand die Position mit
-            // dem spätesten Beginn und anschließend die frühere Item-Reihenfolge.
             (span, usize::MAX - position.page_from, *index)
         })
         .map(|(index, _)| index)
 }
 
-fn extract_pdf_pngs(pdf_path: &Path) -> Result<Vec<InlinePng>> {
-    let list = Command::new("pdfimages")
-        .args(["-list", pdf_path.to_string_lossy().as_ref()])
+fn extract_positioned_pngs(pdf_path: &Path) -> Result<Vec<InlinePng>> {
+    let dir = tempdir()?;
+    let xml_path = dir.path().join("layout.xml");
+    let output = Command::new("pdftohtml")
+        .args([
+            "-xml",
+            "-hidden",
+            "-nodrm",
+            "-enc",
+            "UTF-8",
+            pdf_path.to_string_lossy().as_ref(),
+            xml_path.to_string_lossy().as_ref(),
+        ])
         .output()
-        .with_context(|| "pdfimages konnte nicht gestartet werden; Poppler vollständig installieren")?;
+        .with_context(|| {
+            "pdftohtml konnte nicht gestartet werden; Poppler vollständig installieren"
+        })?;
 
-    if !list.status.success() {
+    if !output.status.success() {
         bail!(
-            "pdfimages -list ist fehlgeschlagen: {}",
-            String::from_utf8_lossy(&list.stderr).trim()
+            "pdftohtml ist fehlgeschlagen: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
         );
     }
 
-    let pages = parse_image_pages(&String::from_utf8_lossy(&list.stdout));
-    if pages.is_empty() {
-        return Ok(Vec::new());
-    }
+    let layout = fs::read_to_string(&xml_path)
+        .with_context(|| format!("PDF-Layout konnte nicht gelesen werden: {}", xml_path.display()))?;
+    parse_layout_images(&layout, dir.path())
+}
 
-    let dir = tempdir()?;
+fn parse_layout_images(layout: &str, base_dir: &Path) -> Result<Vec<InlinePng>> {
+    let page_re = Regex::new(r#"(?s)<page\b(?P<attrs>[^>]*)>(?P<body>.*?)</page>"#)?;
+    let text_re = Regex::new(r#"(?s)<text\b(?P<attrs>[^>]*)>(?P<body>.*?)</text>"#)?;
+    let image_re = Regex::new(r#"<image\b(?P<attrs>[^>]*)/?>"#)?;
+    let tag_re = Regex::new(r#"<[^>]+>"#)?;
+    let oz_re = Regex::new(r#"\b\d{2}\.\d{2}\.\d{2}\.\d{3}\b"#)?;
     let mut images = Vec::new();
 
-    for page in pages {
-        let prefix = dir.path().join(format!("page-{page:04}-img"));
-        let output = Command::new("pdfimages")
-            .args([
-                "-f",
-                &page.to_string(),
-                "-l",
-                &page.to_string(),
-                "-png",
-                pdf_path.to_string_lossy().as_ref(),
-                prefix.to_string_lossy().as_ref(),
-            ])
-            .output()
-            .with_context(|| format!("PNG-Extraktion auf PDF-Seite {page} fehlgeschlagen"))?;
+    for page_caps in page_re.captures_iter(layout) {
+        let attrs = page_caps.name("attrs").map(|value| value.as_str()).unwrap_or("");
+        let body = page_caps.name("body").map(|value| value.as_str()).unwrap_or("");
+        let Some(page) = attr(attrs, "number").and_then(|value| value.parse::<usize>().ok()) else {
+            continue;
+        };
 
-        if !output.status.success() {
-            bail!(
-                "PNG-Extraktion auf PDF-Seite {page} fehlgeschlagen: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+        let mut markers = Vec::new();
+        for text_caps in text_re.captures_iter(body) {
+            let text_attrs = text_caps.name("attrs").map(|value| value.as_str()).unwrap_or("");
+            let top = attr(text_attrs, "top")
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or_default();
+            let raw = text_caps.name("body").map(|value| value.as_str()).unwrap_or("");
+            let stripped = tag_re.replace_all(raw, "");
+            let decoded = unescape(&stripped.replace("&nbsp;", " "))
+                .map(|value| value.into_owned())
+                .unwrap_or_else(|_| stripped.into_owned());
+            if let Some(found) = oz_re.find(&decoded) {
+                markers.push(TextMarker {
+                    top,
+                    oz: found.as_str().to_owned(),
+                });
+            }
         }
+        markers.sort_by_key(|marker| marker.top);
 
-        let mut files = fs::read_dir(dir.path())?
-            .filter_map(|entry| entry.ok().map(|value| value.path()))
-            .filter(|path| is_page_png(path, page))
-            .collect::<Vec<_>>();
-        files.sort();
-
-        for path in files {
-            let bytes = fs::read(&path)?;
-            let Some((width, height)) = png_dimensions(&bytes) else {
+        for image_caps in image_re.captures_iter(body) {
+            let image_attrs = image_caps.name("attrs").map(|value| value.as_str()).unwrap_or("");
+            let top = attr(image_attrs, "top")
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or_default();
+            let display_width = attr(image_attrs, "width")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(297);
+            let display_height = attr(image_attrs, "height")
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or_default();
+            let Some(src) = attr(image_attrs, "src") else {
                 continue;
             };
-            if width < 32 || height < 32 {
+            let source_path = resolve_image_path(base_dir, &src);
+            if !source_path.exists() {
                 continue;
             }
+
+            let reader = ImageReader::open(&source_path)
+                .with_context(|| format!("Bild konnte nicht geöffnet werden: {}", source_path.display()))?
+                .with_guessed_format()?;
+            let decoded = reader
+                .decode()
+                .with_context(|| format!("Bild konnte nicht dekodiert werden: {}", source_path.display()))?;
+            let source_width = decoded.width();
+            let source_height = decoded.height();
+            if source_width < 32 || source_height < 32 || display_width < 24 || display_height < 24 {
+                continue;
+            }
+
+            let mut png = Cursor::new(Vec::new());
+            decoded.write_to(&mut png, ImageFormat::Png)?;
+            let target_oz = nearest_preceding_oz(top, &markers);
             images.push(InlinePng {
                 page,
-                width,
-                data: STANDARD.encode(bytes),
+                top,
+                width: display_width,
+                data: STANDARD.encode(png.into_inner()),
+                target_oz,
             });
         }
     }
 
-    images.sort_by_key(|image| image.page);
+    images.sort_by_key(|image| (image.page, image.top));
     Ok(images)
 }
 
-fn parse_image_pages(output: &str) -> BTreeSet<usize> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let page = parts.next()?.parse::<usize>().ok()?;
-            let _num = parts.next()?.parse::<usize>().ok()?;
-            Some(page)
-        })
-        .collect()
+fn nearest_preceding_oz(top: i32, markers: &[TextMarker]) -> Option<String> {
+    markers
+        .iter()
+        .filter(|marker| marker.top <= top)
+        .max_by_key(|marker| marker.top)
+        .or_else(|| markers.iter().min_by_key(|marker| (marker.top - top).abs()))
+        .map(|marker| marker.oz.clone())
 }
 
-fn is_page_png(path: &PathBuf, page: usize) -> bool {
-    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-        return false;
-    };
-    name.starts_with(&format!("page-{page:04}-img-"))
-        && path.extension().and_then(|value| value.to_str()) == Some("png")
-}
-
-fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    const SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    if bytes.len() < 24 || &bytes[..8] != SIGNATURE || &bytes[12..16] != b"IHDR" {
-        return None;
+fn resolve_image_path(base_dir: &Path, src: &str) -> PathBuf {
+    let path = Path::new(src);
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        base_dir.join(path)
     }
-    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
-    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
-    Some((width, height))
+}
+
+fn attr(attrs: &str, name: &str) -> Option<String> {
+    let double = format!("{name}=\"");
+    if let Some(start) = attrs.find(&double) {
+        let rest = &attrs[start + double.len()..];
+        return rest.find('"').map(|end| rest[..end].to_owned());
+    }
+
+    let single = format!("{name}='");
+    let start = attrs.find(&single)?;
+    let rest = &attrs[start + single.len()..];
+    rest.find('\'').map(|end| rest[..end].to_owned())
 }
 
 fn image_xml(image: &InlinePng, indent: &str) -> String {
@@ -204,7 +290,7 @@ fn inject_images_into_items(
 ) -> Result<(String, usize)> {
     let mut by_item = vec![Vec::<&InlinePng>::new(); positions.len()];
     for image in images {
-        if let Some(index) = best_position_index(image.page, positions) {
+        if let Some(index) = best_position_index(image, positions) {
             by_item[index].push(image);
         }
     }
@@ -272,20 +358,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_png_dimensions() {
-        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
-        png.extend_from_slice(&297u32.to_be_bytes());
-        png.extend_from_slice(&224u32.to_be_bytes());
-        assert_eq!(png_dimensions(&png), Some((297, 224)));
+    fn chooses_nearest_preceding_oz() {
+        let markers = vec![
+            TextMarker {
+                top: 100,
+                oz: "01.01.01.010".into(),
+            },
+            TextMarker {
+                top: 500,
+                oz: "01.01.01.020".into(),
+            },
+        ];
+        assert_eq!(nearest_preceding_oz(450, &markers).as_deref(), Some("01.01.01.010"));
+        assert_eq!(nearest_preceding_oz(700, &markers).as_deref(), Some("01.01.01.020"));
     }
 
     #[test]
-    fn chooses_position_by_page_range() {
-        let positions = [
-            PositionRef { page_from: 10, page_to: 12 },
-            PositionRef { page_from: 11, page_to: 11 },
-        ];
-        assert_eq!(best_position_index(11, &positions), Some(1));
+    fn parses_positioned_image_from_layout() {
+        let dir = tempdir().unwrap();
+        let image_path = dir.path().join("layout-1_1.png");
+        image::DynamicImage::new_rgb8(100, 80)
+            .save_with_format(&image_path, ImageFormat::Png)
+            .unwrap();
+        let xml = r#"<pdf2xml><page number="1"><text top="100">01.01.01.010 Leistung</text><image top="220" width="297" height="100" src="layout-1_1.png"/></page></pdf2xml>"#;
+        let images = parse_layout_images(xml, dir.path()).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].target_oz.as_deref(), Some("01.01.01.010"));
     }
 
     #[test]
@@ -293,12 +391,22 @@ mod tests {
         let xml = "<GAEB><Item ID=\"a\"><Description><CompleteText><OutlineText/></CompleteText></Description></Item><Item ID=\"b\"><Description><CompleteText><OutlineText/></CompleteText></Description></Item></GAEB>";
         let images = [InlinePng {
             page: 2,
+            top: 300,
             width: 297,
             data: "iVBORw0KGgo=".into(),
+            target_oz: Some("01.01.01.020".into()),
         }];
         let positions = [
-            PositionRef { page_from: 1, page_to: 1 },
-            PositionRef { page_from: 2, page_to: 2 },
+            PositionRef {
+                oz: "01.01.01.010".into(),
+                page_from: 1,
+                page_to: 1,
+            },
+            PositionRef {
+                oz: "01.01.01.020".into(),
+                page_from: 2,
+                page_to: 2,
+            },
         ];
         let (result, count) = inject_images_into_items(xml, &images, &positions).unwrap();
         assert_eq!(count, 1);
