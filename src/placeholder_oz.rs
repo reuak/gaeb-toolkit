@@ -236,11 +236,11 @@ fn ensure_path<'a>(
 }
 
 fn sort_hierarchy(nodes: &mut Vec<Node>) {
-    nodes.sort_by(|left, right| oz_sort_key(&left.oz).cmp(&oz_sort_key(&right.oz)));
+    nodes.sort_by_key(|node| oz_sort_key(&node.oz));
     for node in nodes {
         sort_hierarchy(&mut node.children);
         node.positions
-            .sort_by(|left, right| oz_sort_key(&left.oz).cmp(&oz_sort_key(&right.oz)));
+            .sort_by_key(|position| oz_sort_key(&position.oz));
     }
 }
 
