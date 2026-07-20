@@ -1,4 +1,4 @@
-use std::{path::Path, process::Command};
+use std::{collections::HashSet, path::Path, process::Command};
 
 use anyhow::{bail, Context};
 
@@ -7,6 +7,8 @@ pub mod inline_png;
 pub mod model;
 pub mod pdf_cleanup;
 pub mod placeholder_oz;
+pub mod price_cleanup;
+pub mod priced_export;
 pub mod reference_cleanup;
 #[path = "parser_v2.rs"]
 pub mod parser;
@@ -15,6 +17,7 @@ pub mod x83;
 pub use inline_png::inject_pdf_pngs;
 pub use model::{BillOfQuantities, Node, Position};
 pub use parser::parse_text;
+pub use priced_export::{write_x83_priced, write_x84};
 
 pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
     let path = path.as_ref();
@@ -43,15 +46,21 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
     placeholder_oz::recover_placeholder_positions_from_text(&text, &mut boq)?;
     reference_cleanup::repair_split_references(&mut boq);
     pdf_cleanup::postprocess_pdf(path, &mut boq)?;
+    price_cleanup::validate_and_repair_prices(&mut boq);
     Ok(boq)
 }
 
 /// Liefert nur echte X83-Konflikte. Bei Positionen mit dem Vermerk
 /// „Position entfällt“ sind Menge und Einheit nicht erforderlich.
 pub fn x83_conflicts(boq: &BillOfQuantities) -> Vec<String> {
+    // Die entfallenen OZ werden einmal gesammelt. Das vermeidet bei vielen
+    // Konflikten eine wiederholte vollständige Traversierung des LV-Baums.
+    let mut omitted = HashSet::new();
+    collect_omitted_positions(&boq.roots, &mut omitted);
+
     x83::x83_conflicts(boq)
         .into_iter()
-        .filter(|conflict| !is_omitted_quantity_or_unit_conflict(boq, conflict))
+        .filter(|conflict| !is_omitted_quantity_or_unit_conflict(&omitted, conflict))
         .collect()
 }
 
@@ -80,27 +89,22 @@ pub fn write_x83(
     x83::write_x83(boq, path, true)
 }
 
-fn is_omitted_quantity_or_unit_conflict(boq: &BillOfQuantities, conflict: &str) -> bool {
+fn is_omitted_quantity_or_unit_conflict(omitted: &HashSet<String>, conflict: &str) -> bool {
     let oz = conflict
         .strip_prefix("Menge fehlt: ")
         .or_else(|| conflict.strip_prefix("Einheit fehlt: "));
-    let Some(oz) = oz else {
-        return false;
-    };
-
-    find_position(&boq.roots, oz.trim()).is_some_and(is_omitted_position)
+    oz.is_some_and(|value| omitted.contains(value.trim()))
 }
 
-fn find_position<'a>(nodes: &'a [Node], oz: &str) -> Option<&'a Position> {
+fn collect_omitted_positions(nodes: &[Node], omitted: &mut HashSet<String>) {
     for node in nodes {
-        if let Some(position) = node.positions.iter().find(|position| position.oz == oz) {
-            return Some(position);
+        for position in &node.positions {
+            if is_omitted_position(position) {
+                omitted.insert(position.oz.clone());
+            }
         }
-        if let Some(position) = find_position(&node.children, oz) {
-            return Some(position);
-        }
+        collect_omitted_positions(&node.children, omitted);
     }
-    None
 }
 
 fn is_omitted_position(position: &Position) -> bool {
