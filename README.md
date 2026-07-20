@@ -8,7 +8,8 @@ Rust-Werkzeug zum Extrahieren und Strukturieren deutscher Leistungsverzeichnisse
 - extrahiert Menge, Einheit, Einheitspreis und Gesamtbetrag
 - übernimmt Kurztext, Langtext, Seitenbezug und Eventualpositionen
 - prüft doppelte OZ und rechnerische Preisabweichungen
-- exportiert eine Master-XML und JSON
+- exportiert Master-XML, JSON und GAEB DA XML 3.3 X83
+- sperrt den X83-Export bei doppelten OZ oder unvollständigen Positionen bis zur manuellen Freigabe
 
 ## Voraussetzungen
 
@@ -18,8 +19,10 @@ Rust-Werkzeug zum Extrahieren und Strukturieren deutscher Leistungsverzeichnisse
 macOS:
 
 ```bash
-brew install rust poppler
+brew install poppler
 ```
+
+Rust wird vorzugsweise über `rustup` installiert.
 
 Ubuntu/Debian:
 
@@ -38,14 +41,36 @@ cargo test
 
 ## Verwendung
 
+Master-XML und JSON:
+
 ```bash
 cargo run --release -- parse angebot.pdf \
   --xml angebot.master.xml \
   --json angebot.json
 ```
 
+GAEB-X83:
+
+```bash
+cargo run --release -- parse angebot.pdf --x83 angebot.x83
+```
+
+Bei Konflikten wird der X83-Export abgebrochen. Nach manueller Prüfung kann er ausdrücklich freigegeben werden:
+
+```bash
+cargo run --release -- parse angebot.pdf \
+  --x83 angebot.x83 \
+  --allow-conflicts
+```
+
+`--allow-conflicts` führt keine automatische Zusammenführung oder Korrektur durch. Doppelte Positionen bleiben getrennt erhalten.
+
 Nach dem Release-Build liegt das Programm unter `target/release/gaeb-toolkit`.
+
+## GAEB-Version
+
+Der X83-Exporter schreibt GAEB DA XML 3.3, Datenphase 83, Versionsdatum `2021-05`. Die Ausgabe sollte zusätzlich mit dem GAEB-XML-Checker beziehungsweise einer geeigneten AVA-Software validiert werden.
 
 ## Aktueller Stand
 
-Der Parser ist auf NOVA-ähnliche LV-Ausdrucke ausgerichtet. PDF ist ein Layoutformat; deshalb werden nicht eindeutig erkennbare oder rechnerisch auffällige Positionen als Warnungen ausgegeben. Der geplante GAEB-X83-Exporter wird auf dem strukturierten Datenmodell aufbauen.
+Der Parser ist auf NOVA-ähnliche LV-Ausdrucke ausgerichtet. PDF ist ein Layoutformat; deshalb werden nicht eindeutig erkennbare oder rechnerisch auffällige Positionen als Warnungen ausgegeben.
