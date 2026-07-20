@@ -36,11 +36,11 @@ struct TextMarker {
     oz: String,
 }
 
-/// Extracts positioned PDF images with Poppler's `pdftohtml` and embeds each
-/// image in the GAEB item belonging to the nearest preceding OZ on that page.
+/// Extrahiert positionierte PDF-Bilder und ordnet sie GAEB-Positionen zu.
 ///
-/// If a page does not repeat the OZ, the parser's page range is used as a
-/// conservative fallback. No images are added to the global AddText block.
+/// Bilder oberhalb der ersten OZ einer Folgeseite gehören weiterhin zur zuletzt
+/// begonnenen Position der vorherigen Seite. Erst Bilder unterhalb einer neuen
+/// OZ werden der neuen Position zugeordnet.
 pub fn inject_pdf_pngs(
     pdf_path: impl AsRef<Path>,
     x83_path: impl AsRef<Path>,
@@ -70,8 +70,6 @@ fn flatten_positions(boq: &BillOfQuantities) -> Vec<PositionRef> {
 }
 
 fn flatten_node(node: &Node, result: &mut Vec<PositionRef>) {
-    // Muss der Reihenfolge in x83::write_category entsprechen:
-    // zuerst Untergliederungen, danach die Itemlist des aktuellen Knotens.
     for child in &node.children {
         flatten_node(child, result);
     }
@@ -169,6 +167,7 @@ fn parse_layout_images(layout: &str, base_dir: &Path) -> Result<Vec<InlinePng>> 
     let tag_re = Regex::new(r#"<[^>]+>"#)?;
     let oz_re = Regex::new(r#"\b\d{2}\.\d{2}\.\d{2}\.\d{3}\b"#)?;
     let mut images = Vec::new();
+    let mut active_oz_from_previous_page: Option<String> = None;
 
     for page_caps in page_re.captures_iter(layout) {
         let attrs = page_caps.name("attrs").map(|value| value.as_str()).unwrap_or("");
@@ -222,15 +221,21 @@ fn parse_layout_images(layout: &str, base_dir: &Path) -> Result<Vec<InlinePng>> 
             let decoded = reader
                 .decode()
                 .with_context(|| format!("Bild konnte nicht dekodiert werden: {}", source_path.display()))?;
-            let source_width = decoded.width();
-            let source_height = decoded.height();
-            if source_width < 32 || source_height < 32 || display_width < 24 || display_height < 24 {
+            if decoded.width() < 32
+                || decoded.height() < 32
+                || display_width < 24
+                || display_height < 24
+            {
                 continue;
             }
 
             let mut png = Cursor::new(Vec::new());
             decoded.write_to(&mut png, ImageFormat::Png)?;
-            let target_oz = nearest_preceding_oz(top, &markers);
+            let target_oz = preceding_oz_with_page_carry(
+                top,
+                &markers,
+                active_oz_from_previous_page.as_deref(),
+            );
             images.push(InlinePng {
                 page,
                 top,
@@ -239,19 +244,27 @@ fn parse_layout_images(layout: &str, base_dir: &Path) -> Result<Vec<InlinePng>> 
                 target_oz,
             });
         }
+
+        if let Some(last) = markers.last() {
+            active_oz_from_previous_page = Some(last.oz.clone());
+        }
     }
 
     images.sort_by_key(|image| (image.page, image.top));
     Ok(images)
 }
 
-fn nearest_preceding_oz(top: i32, markers: &[TextMarker]) -> Option<String> {
+fn preceding_oz_with_page_carry(
+    top: i32,
+    markers: &[TextMarker],
+    previous_page_oz: Option<&str>,
+) -> Option<String> {
     markers
         .iter()
         .filter(|marker| marker.top <= top)
         .max_by_key(|marker| marker.top)
-        .or_else(|| markers.iter().min_by_key(|marker| (marker.top - top).abs()))
         .map(|marker| marker.oz.clone())
+        .or_else(|| previous_page_oz.map(str::to_owned))
 }
 
 fn resolve_image_path(base_dir: &Path, src: &str) -> PathBuf {
@@ -358,7 +371,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chooses_nearest_preceding_oz() {
+    fn chooses_preceding_oz_on_same_page() {
         let markers = vec![
             TextMarker {
                 top: 100,
@@ -369,21 +382,46 @@ mod tests {
                 oz: "01.01.01.020".into(),
             },
         ];
-        assert_eq!(nearest_preceding_oz(450, &markers).as_deref(), Some("01.01.01.010"));
-        assert_eq!(nearest_preceding_oz(700, &markers).as_deref(), Some("01.01.01.020"));
+        assert_eq!(
+            preceding_oz_with_page_carry(450, &markers, None).as_deref(),
+            Some("01.01.01.010")
+        );
+        assert_eq!(
+            preceding_oz_with_page_carry(700, &markers, None).as_deref(),
+            Some("01.01.01.020")
+        );
     }
 
     #[test]
-    fn parses_positioned_image_from_layout() {
+    fn keeps_image_before_first_oz_with_previous_position() {
+        let markers = vec![TextMarker {
+            top: 500,
+            oz: "01.01.01.020".into(),
+        }];
+        assert_eq!(
+            preceding_oz_with_page_carry(200, &markers, Some("01.01.01.010")).as_deref(),
+            Some("01.01.01.010")
+        );
+    }
+
+    #[test]
+    fn parses_continuation_page_image() {
         let dir = tempdir().unwrap();
-        let image_path = dir.path().join("layout-1_1.png");
+        let first = dir.path().join("layout-1_1.png");
+        let second = dir.path().join("layout-2_1.png");
         image::DynamicImage::new_rgb8(100, 80)
-            .save_with_format(&image_path, ImageFormat::Png)
+            .save_with_format(&first, ImageFormat::Png)
             .unwrap();
-        let xml = r#"<pdf2xml><page number="1"><text top="100">01.01.01.010 Leistung</text><image top="220" width="297" height="100" src="layout-1_1.png"/></page></pdf2xml>"#;
+        image::DynamicImage::new_rgb8(100, 80)
+            .save_with_format(&second, ImageFormat::Png)
+            .unwrap();
+        let xml = r#"<pdf2xml>
+<page number="1"><text top="100">01.01.01.010 Leistung</text><image top="220" width="297" height="100" src="layout-1_1.png"/></page>
+<page number="2"><image top="120" width="297" height="100" src="layout-2_1.png"/><text top="500">01.01.01.020 Nächste Position</text></page>
+</pdf2xml>"#;
         let images = parse_layout_images(xml, dir.path()).unwrap();
-        assert_eq!(images.len(), 1);
-        assert_eq!(images[0].target_oz.as_deref(), Some("01.01.01.010"));
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[1].target_oz.as_deref(), Some("01.01.01.010"));
     }
 
     #[test]
