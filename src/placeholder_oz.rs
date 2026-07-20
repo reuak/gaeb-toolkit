@@ -107,6 +107,13 @@ fn recover_from_text(text: &str, boq: &mut BillOfQuantities) -> Result<usize> {
         insert_position(boq, position, &headings);
         count += 1;
     }
+
+    // Nachträglich erkannte Platzhalter-OZ wurden bisher nur angehängt und
+    // erschienen deshalb am Ende des LV. Hier wird die komplette Hierarchie
+    // numerisch sortiert; `__` ist bereits als `00` normalisiert und steht damit
+    // vor `01`, `02`, ... innerhalb desselben Titels.
+    sort_hierarchy(&mut boq.roots);
+
     Ok(count)
 }
 
@@ -224,6 +231,21 @@ fn ensure_path<'a>(
     )
 }
 
+fn sort_hierarchy(nodes: &mut Vec<Node>) {
+    nodes.sort_by(|left, right| oz_sort_key(&left.oz).cmp(&oz_sort_key(&right.oz)));
+    for node in nodes {
+        sort_hierarchy(&mut node.children);
+        node.positions
+            .sort_by(|left, right| oz_sort_key(&left.oz).cmp(&oz_sort_key(&right.oz)));
+    }
+}
+
+fn oz_sort_key(oz: &str) -> Vec<u32> {
+    oz.split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(u32::MAX))
+        .collect()
+}
+
 fn contains_oz(nodes: &[Node], oz: &str) -> bool {
     nodes.iter().any(|node| {
         node.positions.iter().any(|position| position.oz == oz) || contains_oz(&node.children, oz)
@@ -260,5 +282,28 @@ mod tests {
         assert_eq!(placeholder.oz, "02.06.00");
         assert_eq!(placeholder.positions[0].oz, "02.06.00.010");
         assert_eq!(placeholder.positions[1].oz, "02.06.00.020");
+    }
+
+    #[test]
+    fn sorts_placeholder_level_before_numbered_levels() {
+        let mut nodes = vec![Node {
+            oz: "02".into(),
+            children: vec![Node {
+                oz: "02.04".into(),
+                children: vec![
+                    Node { oz: "02.04.01".into(), ..Node::default() },
+                    Node { oz: "02.04.00".into(), ..Node::default() },
+                    Node { oz: "02.04.02".into(), ..Node::default() },
+                ],
+                ..Node::default()
+            }],
+            ..Node::default()
+        }];
+
+        sort_hierarchy(&mut nodes);
+        let children = &nodes[0].children[0].children;
+        assert_eq!(children[0].oz, "02.04.00");
+        assert_eq!(children[1].oz, "02.04.01");
+        assert_eq!(children[2].oz, "02.04.02");
     }
 }
