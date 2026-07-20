@@ -34,9 +34,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     let heading_re = Regex::new(r"^(?P<oz>\d{2}(?:\.\d{2}){0,2})\s+(?P<title>\S.*)$")?;
     let position_start_re =
         Regex::new(r"^(?P<oz>\d{2}\.\d{2}\.\d{2}\.\d{3})(?:\s+(?P<rest>.*))?$")?;
-    let priced_data_re = Regex::new(
-        r"^(?P<qty>[\d.]+,\d{3})\s+(?P<unit>\S+)\s+(?P<ep>[\d.]+,\d{2})\s*€(?:\s+(?P<gb>[\d.]+,\d{2})\s*€|\s+Nur\s+Einh\.-Pr\.)?\s*$",
-    )?;
+    let priced_data_re = priced_data_regex()?;
     let sum_re = Regex::new(r"^Summe\s+\d{2}(?:\.\d{2}){1,2}\b")?;
     let footer_re = Regex::new(r"^Druckausgabe vom:.*\d+\s*/\s*\d+\s*$")?;
 
@@ -73,12 +71,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                 };
 
                 if let Some(price_caps) = priced_data_re.captures(rest) {
-                    position.quantity = parse_decimal(price_caps.name("qty").map(|v| v.as_str()));
-                    position.unit = price_caps.name("unit").map(|v| v.as_str().to_owned());
-                    position.unit_price = parse_decimal(price_caps.name("ep").map(|v| v.as_str()));
-                    position.total_price = parse_decimal(price_caps.name("gb").map(|v| v.as_str()));
-                    position.provisional = rest.contains("Nur Einh.-Pr.");
-                    position.price_only = rest.contains("Nur Einh.-Pr.");
+                    apply_price_captures(&mut position, &price_caps, rest);
                 } else if !rest.is_empty() {
                     position_lines.push(rest.to_owned());
                 }
@@ -122,8 +115,6 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                 if line == "Eventualposition ohne GB" {
                     position.provisional = true;
                     position.price_only = true;
-                } else if line == "Position entfällt" {
-                    position_lines.push(line);
                 } else if !matches!(
                     line.as_str(),
                     "Fortsetzung von vorheriger Seite" | "Fortsetzung auf nächster Seite"
@@ -147,6 +138,41 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     apply_heading_titles(&mut boq.roots, &headings);
     validate(&mut boq);
     Ok(boq)
+}
+
+fn priced_data_regex() -> Result<Regex, regex::Error> {
+    Regex::new(
+        r"^(?P<qty>[\d.]+,\d{3})\s+(?P<unit>\S+)\s+(?P<ep>[\d.]+,\d{2})\s*€(?:\s+(?P<gb>[\d.]+,\d{2})\s*€|\s+Nur\s+Einh\.-Pr\.)?\s*$",
+    )
+}
+
+fn apply_price_captures(position: &mut Position, caps: &regex::Captures<'_>, source: &str) {
+    position.quantity = parse_decimal(caps.name("qty").map(|v| v.as_str()));
+    position.unit = caps.name("unit").map(|v| v.as_str().to_owned());
+    position.unit_price = parse_decimal(caps.name("ep").map(|v| v.as_str()));
+    position.total_price = parse_decimal(caps.name("gb").map(|v| v.as_str()));
+    position.provisional |= source.contains("Nur Einh.-Pr.");
+    position.price_only |= source.contains("Nur Einh.-Pr.");
+}
+
+fn extract_leading_multiline_price(position: &mut Position, lines: &mut Vec<String>) {
+    if position.quantity.is_some() || lines.is_empty() {
+        return;
+    }
+
+    let Ok(price_re) = priced_data_regex() else {
+        return;
+    };
+    let max_fragments = lines.len().min(4);
+
+    for count in 1..=max_fragments {
+        let candidate = lines[..count].join(" ");
+        if let Some(caps) = price_re.captures(&candidate) {
+            apply_price_captures(position, &caps, &candidate);
+            lines.drain(..count);
+            return;
+        }
+    }
 }
 
 pub fn parse_decimal(value: Option<&str>) -> Option<Decimal> {
@@ -210,6 +236,8 @@ fn finish_position(
     } else {
         position.page_from
     };
+
+    extract_leading_multiline_price(&mut position, lines);
 
     let cleaned = lines
         .iter()
@@ -345,6 +373,10 @@ fn validate_node(
 mod tests {
     use super::*;
 
+    fn first_position(boq: &BillOfQuantities) -> &Position {
+        &boq.roots[0].children[0].children[0].positions[0]
+    }
+
     #[test]
     fn parses_german_decimal() {
         assert_eq!(parse_decimal(Some("1.263,50")), Some(Decimal::new(126350, 2)));
@@ -362,18 +394,42 @@ mod tests {
         assert_eq!(boq.roots[0].children[0].title, "Vorbereitung");
         assert_eq!(boq.roots[0].children[0].children[0].oz, "01.01.02");
         assert_eq!(boq.roots[0].children[0].children[0].title, "Schutz");
-        assert_eq!(boq.roots[0].children[0].children[0].positions[0].oz, "01.01.02.030");
+        assert_eq!(first_position(&boq).oz, "01.01.02.030");
     }
 
     #[test]
     fn detects_position_without_prices() {
         let text = "01.01.01.120 Verkehrsrechtl. Beantragung Baustelleneinrichtung\nPosition entfällt\n";
         let boq = parse_text("test.txt", text).unwrap();
-        let position = &boq.roots[0].children[0].children[0].positions[0];
+        let position = first_position(&boq);
         assert_eq!(position.oz, "01.01.01.120");
         assert_eq!(position.short_text, "Verkehrsrechtl. Beantragung Baustelleneinrichtung");
         assert_eq!(position.long_text, "Position entfällt");
         assert!(boq.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_multiline_price_data() {
+        let text = "01.01.01.020\n80,000 lfm\n38,70 €\n3.096,00 €\nBauzaun, Stahlrahmen mobil\nBeschreibung\n";
+        let boq = parse_text("test.txt", text).unwrap();
+        let position = first_position(&boq);
+        assert_eq!(position.quantity, Some(Decimal::new(80000, 3)));
+        assert_eq!(position.unit.as_deref(), Some("lfm"));
+        assert_eq!(position.unit_price, Some(Decimal::new(3870, 2)));
+        assert_eq!(position.total_price, Some(Decimal::new(309600, 2)));
+        assert_eq!(position.short_text, "Bauzaun, Stahlrahmen mobil");
+        assert_eq!(position.long_text, "Beschreibung");
+    }
+
+    #[test]
+    fn keeps_position_across_page_break() {
+        let text = "01.01.01.070 10,000 StMt 25,00 € 250,00 €\nBauzaun-Tor\nFortsetzung auf nächster Seite\n\u{000C}Fortsetzung von vorheriger Seite\nvorhalten und unterhalten\n";
+        let boq = parse_text("test.txt", text).unwrap();
+        let position = first_position(&boq);
+        assert_eq!(position.page_from, Some(1));
+        assert_eq!(position.page_to, Some(2));
+        assert_eq!(position.short_text, "Bauzaun-Tor");
+        assert_eq!(position.long_text, "vorhalten und unterhalten");
     }
 
     #[test]
