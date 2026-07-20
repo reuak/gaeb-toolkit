@@ -32,8 +32,10 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> Result<BillOfQuantities> {
 
 pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     let heading_re = Regex::new(r"^(?P<oz>\d{2}(?:\.\d{2}){0,2})\s+(?P<title>\S.*)$")?;
-    let position_re = Regex::new(
-        r"^(?P<oz>\d{2}\.\d{2}\.\d{2}\.\d{3})\s+(?P<qty>[\d.]+,\d{3})\s+(?P<unit>\S+)\s+(?P<ep>[\d.]+,\d{2})\s*€(?:\s+(?P<gb>[\d.]+,\d{2})\s*€|\s+Nur\s+Einh\.-Pr\.)?\s*$",
+    let position_start_re =
+        Regex::new(r"^(?P<oz>\d{2}\.\d{2}\.\d{2}\.\d{3})(?:\s+(?P<rest>.*))?$")?;
+    let priced_data_re = Regex::new(
+        r"^(?P<qty>[\d.]+,\d{3})\s+(?P<unit>\S+)\s+(?P<ep>[\d.]+,\d{2})\s*€(?:\s+(?P<gb>[\d.]+,\d{2})\s*€|\s+Nur\s+Einh\.-Pr\.)?\s*$",
     )?;
     let sum_re = Regex::new(r"^Summe\s+\d{2}(?:\.\d{2}){1,2}\b")?;
     let footer_re = Regex::new(r"^Druckausgabe vom:.*\d+\s*/\s*\d+\s*$")?;
@@ -54,7 +56,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                 continue;
             }
 
-            if let Some(caps) = position_re.captures(&line) {
+            if let Some(caps) = position_start_re.captures(&line) {
                 finish_position(
                     &mut boq,
                     &headings,
@@ -62,17 +64,26 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                     &mut position_lines,
                     page_number,
                 );
-                current_position = Some(Position {
+
+                let rest = caps.name("rest").map(|v| v.as_str()).unwrap_or_default();
+                let mut position = Position {
                     oz: caps["oz"].to_owned(),
-                    quantity: parse_decimal(caps.name("qty").map(|v| v.as_str())),
-                    unit: caps.name("unit").map(|v| v.as_str().to_owned()),
-                    unit_price: parse_decimal(caps.name("ep").map(|v| v.as_str())),
-                    total_price: parse_decimal(caps.name("gb").map(|v| v.as_str())),
                     page_from: Some(page_number),
-                    provisional: line.contains("Nur Einh.-Pr."),
-                    price_only: line.contains("Nur Einh.-Pr."),
                     ..Position::default()
-                });
+                };
+
+                if let Some(price_caps) = priced_data_re.captures(rest) {
+                    position.quantity = parse_decimal(price_caps.name("qty").map(|v| v.as_str()));
+                    position.unit = price_caps.name("unit").map(|v| v.as_str().to_owned());
+                    position.unit_price = parse_decimal(price_caps.name("ep").map(|v| v.as_str()));
+                    position.total_price = parse_decimal(price_caps.name("gb").map(|v| v.as_str()));
+                    position.provisional = rest.contains("Nur Einh.-Pr.");
+                    position.price_only = rest.contains("Nur Einh.-Pr.");
+                } else if !rest.is_empty() {
+                    position_lines.push(rest.to_owned());
+                }
+
+                current_position = Some(position);
                 continue;
             }
 
@@ -111,6 +122,8 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                 if line == "Eventualposition ohne GB" {
                     position.provisional = true;
                     position.price_only = true;
+                } else if line == "Position entfällt" {
+                    position_lines.push(line);
                 } else if !matches!(
                     line.as_str(),
                     "Fortsetzung von vorheriger Seite" | "Fortsetzung auf nächster Seite"
@@ -191,14 +204,21 @@ fn finish_position(
     let Some(mut position) = current.take() else {
         return;
     };
-    if page_to > 0 {
-        position.page_to = Some(page_to);
+
+    position.page_to = if page_to > 0 {
+        Some(page_to)
     } else {
-        position.page_to = position.page_from;
-    }
-    if let Some(first) = lines.first() {
+        position.page_from
+    };
+
+    let cleaned = lines
+        .iter()
+        .filter(|line| !line.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(first) = cleaned.first() {
         position.short_text = first.clone();
-        position.long_text = lines.iter().skip(1).cloned().collect::<Vec<_>>().join("\n");
+        position.long_text = cleaned.iter().skip(1).cloned().collect::<Vec<_>>().join("\n");
     }
     lines.clear();
 
@@ -302,7 +322,9 @@ fn validate_node(
         if !seen.insert(position.oz.clone()) {
             warnings.push(format!("Doppelte OZ: {}", position.oz));
         }
-        if position.quantity.is_none() || position.unit_price.is_none() {
+        let omitted = position.short_text == "Position entfällt"
+            || position.long_text.lines().any(|line| line == "Position entfällt");
+        if !omitted && (position.quantity.is_none() || position.unit_price.is_none()) {
             warnings.push(format!("Unvollständige Preiszeile: {}", position.oz));
         }
         if let (Some(quantity), Some(unit_price), Some(total)) =
@@ -341,6 +363,17 @@ mod tests {
         assert_eq!(boq.roots[0].children[0].children[0].oz, "01.01.02");
         assert_eq!(boq.roots[0].children[0].children[0].title, "Schutz");
         assert_eq!(boq.roots[0].children[0].children[0].positions[0].oz, "01.01.02.030");
+    }
+
+    #[test]
+    fn detects_position_without_prices() {
+        let text = "01.01.01.120 Verkehrsrechtl. Beantragung Baustelleneinrichtung\nPosition entfällt\n";
+        let boq = parse_text("test.txt", text).unwrap();
+        let position = &boq.roots[0].children[0].children[0].positions[0];
+        assert_eq!(position.oz, "01.01.01.120");
+        assert_eq!(position.short_text, "Verkehrsrechtl. Beantragung Baustelleneinrichtung");
+        assert_eq!(position.long_text, "Position entfällt");
+        assert!(boq.warnings.is_empty());
     }
 
     #[test]
