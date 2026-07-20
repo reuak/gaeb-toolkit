@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use gaeb_toolkit::{
     export::{write_json, write_master_xml},
-    parse_pdf, write_x83,
+    inject_pdf_pngs, parse_pdf, write_x83,
 };
 
 #[derive(Debug, Parser)]
@@ -50,7 +50,11 @@ fn main() -> Result<()> {
                 write_json(&boq, path)?;
             }
             if let Some(path) = x83 {
-                write_x83(&boq, path, allow_conflicts)?;
+                write_x83(&boq, &path, allow_conflicts)?;
+                let image_count = inject_pdf_pngs(&input, &path)?;
+                if image_count > 0 {
+                    eprintln!("{image_count} PNG-Abbildung(en) inline in die X83 eingebettet.");
+                }
             }
             if boq.warnings.is_empty() {
                 eprintln!("Parsing abgeschlossen.");
