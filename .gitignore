@@ -1,4 +1,6 @@
 /target/
+/data/
+.env
 input/
 output/
 *.pdf

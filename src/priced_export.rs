@@ -8,7 +8,11 @@ use quick_xml::{
 };
 use rust_decimal::Decimal;
 
-use crate::{model::{BillOfQuantities, Node, Position}, x83_conflicts};
+use crate::{
+    breakdown::{from_boq, level_label},
+    model::{BillOfQuantities, Node, Position},
+    x83_conflicts,
+};
 
 #[derive(Clone, Copy)]
 enum Phase {
@@ -159,7 +163,10 @@ fn write_gaeb_info<W: std::io::Write>(writer: &mut Writer<W>) -> Result<()> {
     Ok(())
 }
 
-fn write_project_info<W: std::io::Write>(writer: &mut Writer<W>, boq: &BillOfQuantities) -> Result<()> {
+fn write_project_info<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    boq: &BillOfQuantities,
+) -> Result<()> {
     writer.write_event(Event::Start(BytesStart::new("PrjInfo")))?;
     write_text(writer, "NamePrj", project_number(boq))?;
     write_text(writer, "LblPrj", project_label(boq))?;
@@ -175,10 +182,11 @@ fn write_boq_info<W: std::io::Write>(writer: &mut Writer<W>, boq: &BillOfQuantit
     write_text(writer, "LblBoQ", project_label(boq))?;
     write_text(writer, "OutlCompl", "AllTxt")?;
 
-    for (label, length) in [("Bereich", 2), ("Titel", 2), ("Untertitel", 2)] {
+    let breakdown = from_boq(boq);
+    for (index, length) in breakdown.level_lengths.iter().enumerate() {
         writer.write_event(Event::Start(BytesStart::new("BoQBkdn")))?;
         write_text(writer, "Type", "BoQLevel")?;
-        write_text(writer, "LblBoQBkdn", label)?;
+        write_text(writer, "LblBoQBkdn", &level_label(index))?;
         write_text(writer, "Length", &length.to_string())?;
         write_text(writer, "Num", "Yes")?;
         writer.write_event(Event::End(BytesEnd::new("BoQBkdn")))?;
@@ -186,14 +194,18 @@ fn write_boq_info<W: std::io::Write>(writer: &mut Writer<W>, boq: &BillOfQuantit
 
     writer.write_event(Event::Start(BytesStart::new("BoQBkdn")))?;
     write_text(writer, "Type", "Item")?;
-    write_text(writer, "Length", "3")?;
+    write_text(writer, "Length", &breakdown.item_length.to_string())?;
     write_text(writer, "Num", "Yes")?;
     writer.write_event(Event::End(BytesEnd::new("BoQBkdn")))?;
     writer.write_event(Event::End(BytesEnd::new("BoQInfo")))?;
     Ok(())
 }
 
-fn write_category<W: std::io::Write>(writer: &mut Writer<W>, node: &Node, ids: &mut IdGenerator) -> Result<()> {
+fn write_category<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    node: &Node,
+    ids: &mut IdGenerator,
+) -> Result<()> {
     let id = ids.next();
     let rno = node.oz.rsplit('.').next().unwrap_or(&node.oz);
     let mut start = BytesStart::new("BoQCtgy");
@@ -219,7 +231,11 @@ fn write_category<W: std::io::Write>(writer: &mut Writer<W>, node: &Node, ids: &
     Ok(())
 }
 
-fn write_item<W: std::io::Write>(writer: &mut Writer<W>, position: &Position, ids: &mut IdGenerator) -> Result<()> {
+fn write_item<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    position: &Position,
+    ids: &mut IdGenerator,
+) -> Result<()> {
     let id = ids.next();
     let rno = position.oz.rsplit('.').next().unwrap_or(&position.oz);
     let mut start = BytesStart::new("Item");
@@ -230,7 +246,11 @@ fn write_item<W: std::io::Write>(writer: &mut Writer<W>, position: &Position, id
     if let Some(quantity) = position.quantity {
         write_decimal(writer, "Qty", quantity, 3)?;
     }
-    if let Some(unit) = position.unit.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(unit) = position
+        .unit
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         write_text(writer, "QU", unit)?;
     }
     if let Some(unit_price) = position.unit_price {
@@ -258,7 +278,12 @@ fn write_item<W: std::io::Write>(writer: &mut Writer<W>, position: &Position, id
     Ok(())
 }
 
-fn write_decimal<W: std::io::Write>(writer: &mut Writer<W>, name: &str, value: Decimal, scale: u32) -> Result<()> {
+fn write_decimal<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    name: &str,
+    value: Decimal,
+    scale: u32,
+) -> Result<()> {
     write_text(writer, name, &value.round_dp(scale).normalize().to_string())
 }
 
@@ -272,7 +297,11 @@ fn write_add_text<W: std::io::Write>(writer: &mut Writer<W>, value: &str) -> Res
     Ok(())
 }
 
-fn write_rich_text<W: std::io::Write>(writer: &mut Writer<W>, name: &str, value: &str) -> Result<()> {
+fn write_rich_text<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    name: &str,
+    value: &str,
+) -> Result<()> {
     writer.write_event(Event::Start(BytesStart::new(name)))?;
     writer.write_event(Event::Start(BytesStart::new("p")))?;
     write_text(writer, "span", value)?;
@@ -281,9 +310,16 @@ fn write_rich_text<W: std::io::Write>(writer: &mut Writer<W>, name: &str, value:
     Ok(())
 }
 
-fn write_text_block<W: std::io::Write>(writer: &mut Writer<W>, name: &str, value: &str) -> Result<()> {
+fn write_text_block<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    name: &str,
+    value: &str,
+) -> Result<()> {
     writer.write_event(Event::Start(BytesStart::new(name)))?;
-    let lines = value.lines().filter(|line| !line.trim().is_empty()).collect::<Vec<_>>();
+    let lines = value
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
     if lines.is_empty() {
         writer.write_event(Event::Start(BytesStart::new("p")))?;
         write_text(writer, "span", "")?;
@@ -307,11 +343,19 @@ fn write_text<W: std::io::Write>(writer: &mut Writer<W>, name: &str, value: &str
 }
 
 fn project_number(boq: &BillOfQuantities) -> &str {
-    if boq.project.trim().is_empty() { "01" } else { &boq.project }
+    if boq.project.trim().is_empty() {
+        "01"
+    } else {
+        &boq.project
+    }
 }
 
 fn project_label(boq: &BillOfQuantities) -> &str {
-    if boq.project.trim().is_empty() { &boq.source } else { &boq.project }
+    if boq.project.trim().is_empty() {
+        &boq.source
+    } else {
+        &boq.project
+    }
 }
 
 fn currency_label(currency: &str) -> &str {
@@ -333,9 +377,9 @@ impl IdGenerator {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::fs;
     use tempfile::tempdir;
-    use super::*;
 
     fn priced_boq() -> BillOfQuantities {
         let mut boq = BillOfQuantities::new("angebot.pdf");

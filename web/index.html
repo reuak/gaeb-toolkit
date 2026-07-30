@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Leistungsverzeichnisse aus PDF sicher in GAEB X83 konvertieren."
+    />
+    <title>LV Konverter · PDF zu GAEB X83</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="LV Konverter Startseite">
+        <span class="brand-mark">LV</span>
+        <span>Konverter</span>
+      </a>
+      <div class="header-note">PDF → GAEB DA XML 3.3</div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Für Ausschreibung und Vergabe</p>
+          <h1>Aus dem LV-PDF wird eine strukturierte X83.</h1>
+          <p class="intro">
+            Laden Sie Ihr Leistungsverzeichnis hoch. Der Parser erkennt
+            OZ-Struktur, Mengen, Einheiten und Positionstexte und stellt die
+            GAEB-Datei anschließend zum Download bereit.
+          </p>
+          <div class="trust-row" aria-label="Leistungsmerkmale">
+            <span>Bis 2 MB kostenlos</span>
+            <span>2 Konvertierungen pro Tag</span>
+            <span>Löschung nach 24 Stunden</span>
+          </div>
+        </div>
+
+        <section class="converter-card" aria-labelledby="converter-title">
+          <div class="card-heading">
+            <div>
+              <p class="step-label">Kostenlose Konvertierung</p>
+              <h2 id="converter-title">LV jetzt umwandeln</h2>
+            </div>
+            <span class="format-badge">X83</span>
+          </div>
+
+          <form id="convert-form" enctype="multipart/form-data">
+            <label class="file-drop" id="file-drop">
+              <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required />
+              <span class="file-icon">PDF</span>
+              <span class="file-title" id="file-title">PDF auswählen oder hier ablegen</span>
+              <span class="file-meta" id="file-meta">Maximal 2 MB</span>
+            </label>
+
+            <div class="field-grid">
+              <label>
+                <span>Name *</span>
+                <input name="contact_name" autocomplete="name" required maxlength="120" />
+              </label>
+              <label>
+                <span>E-Mail *</span>
+                <input name="email" type="email" autocomplete="email" required maxlength="254" />
+              </label>
+              <label>
+                <span>Unternehmen</span>
+                <input name="company" autocomplete="organization" maxlength="160" />
+              </label>
+              <label>
+                <span>Telefon</span>
+                <input name="phone" type="tel" autocomplete="tel" maxlength="80" />
+              </label>
+            </div>
+
+            <label class="consent">
+              <input name="consent" type="checkbox" required />
+              <span>
+                Ich stimme der Verarbeitung des PDFs zur Konvertierung und der
+                automatischen Löschung nach 24 Stunden zu. *
+              </span>
+            </label>
+
+            <button class="primary-button" type="submit">
+              <span>PDF in X83 konvertieren</span>
+              <span aria-hidden="true">→</span>
+            </button>
+            <p class="form-note">Keine Registrierung. Kein Dokumententraining.</p>
+          </form>
+
+          <div class="job-panel" id="job-panel" hidden aria-live="polite">
+            <div class="job-state">
+              <span class="spinner" id="spinner" aria-hidden="true"></span>
+              <div>
+                <p class="job-kicker" id="job-kicker">Konvertierung läuft</p>
+                <h3 id="job-title">Das LV wird strukturiert.</h3>
+                <p id="job-message">Je nach Seitenzahl kann das einen Moment dauern.</p>
+              </div>
+            </div>
+            <div class="progress"><span id="progress-bar"></span></div>
+            <a class="download-button" id="download-button" hidden> X83 herunterladen </a>
+            <button class="secondary-button" id="new-job-button" type="button" hidden>
+              Weiteres LV konvertieren
+            </button>
+          </div>
+        </section>
+      </section>
+
+      <section class="how-it-works" aria-labelledby="how-title">
+        <div>
+          <p class="eyebrow">Ein klarer Ablauf</p>
+          <h2 id="how-title">Vom Dokument zur Austauschdatei.</h2>
+        </div>
+        <ol>
+          <li><span>01</span><strong>PDF hochladen</strong><p>Kontaktdaten und ein LV bis 2 MB übermitteln.</p></li>
+          <li><span>02</span><strong>Struktur prüfen</strong><p>OZ, Titel, Positionen und Mengen werden validiert.</p></li>
+          <li><span>03</span><strong>X83 laden</strong><p>Die fertige Datei steht 24 Stunden geschützt bereit.</p></li>
+        </ol>
+      </section>
+
+      <section class="paid-preview">
+        <div>
+          <p class="eyebrow">Für größere Projekte</p>
+          <h2>Mehr Volumen, X84 und Stapelverarbeitung.</h2>
+          <p>
+            Der nächste Ausbau ergänzt Credits, größere Dateien, X84,
+            priorisierte Verarbeitung und Firmenkonten.
+          </p>
+        </div>
+        <span class="coming-soon">In Vorbereitung</span>
+      </section>
+    </main>
+
+    <footer>
+      <span>© <span id="year"></span> LV Konverter</span>
+      <nav aria-label="Rechtliches">
+        <a href="/impressum.html">Impressum</a>
+        <a href="/datenschutz.html">Datenschutz</a>
+      </nav>
+    </footer>
+  </body>
+</html>

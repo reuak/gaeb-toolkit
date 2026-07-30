@@ -1,0 +1,9 @@
+target
+data
+input
+output
+.git
+.DS_Store
+*.pdf
+*.x83
+*.x84

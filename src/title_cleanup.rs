@@ -9,6 +9,9 @@ static TRAILING_TOTAL_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid trailing total regex")
 });
 
+static DOTTED_LEADER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s*\.{3,}.*$").expect("valid dotted leader regex"));
+
 /// Entfernt am Ende von Bereichs-, Titel- und Untertitelbezeichnungen
 /// angehängte Summen aus dem PDF-Layout. Die Bereinigung erfolgt direkt am
 /// Modell, damit sie für X83, bepreiste X83, X84, JSON und Master-XML gilt.
@@ -20,7 +23,7 @@ pub fn clean_titles(nodes: &mut [Node]) {
 }
 
 fn strip_trailing_totals(value: &str) -> String {
-    let mut result = value.trim().to_owned();
+    let mut result = DOTTED_LEADER_RE.replace(value.trim(), "").trim().to_owned();
     loop {
         let cleaned = TRAILING_TOTAL_RE.replace(&result, "").trim().to_owned();
         if cleaned == result {
@@ -46,5 +49,9 @@ mod tests {
             "Schutzmaßnahmen"
         );
         assert_eq!(strip_trailing_totals("Titel 2026"), "Titel 2026");
+        assert_eq!(
+            strip_trailing_totals("Titel - Kabel und Leitungen ........................."),
+            "Titel - Kabel und Leitungen"
+        );
     }
 }

@@ -56,8 +56,12 @@ pub fn inject_pdf_pngs(
     let xml = fs::read_to_string(x83_path)
         .with_context(|| format!("X83 konnte nicht gelesen werden: {}", x83_path.display()))?;
     let (updated, embedded) = inject_images_into_items(&xml, &images, &positions)?;
-    fs::write(x83_path, updated)
-        .with_context(|| format!("X83 konnte nicht geschrieben werden: {}", x83_path.display()))?;
+    fs::write(x83_path, updated).with_context(|| {
+        format!(
+            "X83 konnte nicht geschrieben werden: {}",
+            x83_path.display()
+        )
+    })?;
     Ok(embedded)
 }
 
@@ -120,9 +124,7 @@ fn best_position_index(image: &InlinePng, positions: &[PositionRef]) -> Option<u
     positions
         .iter()
         .enumerate()
-        .filter(|(_, position)| {
-            position.page_from <= image.page && image.page <= position.page_to
-        })
+        .filter(|(_, position)| position.page_from <= image.page && image.page <= position.page_to)
         .min_by_key(|(index, position)| {
             let span = position.page_to - position.page_from;
             (span, usize::MAX - position.page_from, *index)
@@ -155,8 +157,12 @@ fn extract_positioned_pngs(pdf_path: &Path) -> Result<Vec<InlinePng>> {
         );
     }
 
-    let layout = fs::read_to_string(&xml_path)
-        .with_context(|| format!("PDF-Layout konnte nicht gelesen werden: {}", xml_path.display()))?;
+    let layout = fs::read_to_string(&xml_path).with_context(|| {
+        format!(
+            "PDF-Layout konnte nicht gelesen werden: {}",
+            xml_path.display()
+        )
+    })?;
     parse_layout_images(&layout, dir.path())
 }
 
@@ -170,23 +176,54 @@ fn parse_layout_images(layout: &str, base_dir: &Path) -> Result<Vec<InlinePng>> 
     let mut active_oz_from_previous_page: Option<String> = None;
 
     for page_caps in page_re.captures_iter(layout) {
-        let attrs = page_caps.name("attrs").map(|value| value.as_str()).unwrap_or("");
-        let body = page_caps.name("body").map(|value| value.as_str()).unwrap_or("");
+        let attrs = page_caps
+            .name("attrs")
+            .map(|value| value.as_str())
+            .unwrap_or("");
+        let body = page_caps
+            .name("body")
+            .map(|value| value.as_str())
+            .unwrap_or("");
         let Some(page) = attr(attrs, "number").and_then(|value| value.parse::<usize>().ok()) else {
             continue;
         };
+        let page_height = attr(attrs, "height")
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or_default();
+        let header_zone_limit = page_height / 4;
 
         let mut markers = Vec::new();
+        let mut header_cutoff = 0i32;
         for text_caps in text_re.captures_iter(body) {
-            let text_attrs = text_caps.name("attrs").map(|value| value.as_str()).unwrap_or("");
+            let text_attrs = text_caps
+                .name("attrs")
+                .map(|value| value.as_str())
+                .unwrap_or("");
             let top = attr(text_attrs, "top")
                 .and_then(|value| value.parse::<i32>().ok())
                 .unwrap_or_default();
-            let raw = text_caps.name("body").map(|value| value.as_str()).unwrap_or("");
+            let height = attr(text_attrs, "height")
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or_default();
+            let raw = text_caps
+                .name("body")
+                .map(|value| value.as_str())
+                .unwrap_or("");
             let stripped = tag_re.replace_all(raw, "");
             let decoded = unescape(&stripped.replace("&nbsp;", " "))
                 .map(|value| value.into_owned())
                 .unwrap_or_else(|_| stripped.into_owned());
+            let normalized = decoded.split_whitespace().collect::<Vec<_>>().join(" ");
+            if top <= header_zone_limit
+                && (normalized == "OZ"
+                    || normalized.starts_with("OZ ")
+                    || normalized == "Leistungsbeschreibung"
+                    || normalized.starts_with("Einheitspreis")
+                    || normalized.starts_with("Gesamtbetrag")
+                    || normalized == "in EUR")
+            {
+                header_cutoff = header_cutoff.max(top + height);
+            }
             if let Some(found) = oz_re.find(&decoded) {
                 markers.push(TextMarker {
                     top,
@@ -197,7 +234,10 @@ fn parse_layout_images(layout: &str, base_dir: &Path) -> Result<Vec<InlinePng>> 
         markers.sort_by_key(|marker| marker.top);
 
         for image_caps in image_re.captures_iter(body) {
-            let image_attrs = image_caps.name("attrs").map(|value| value.as_str()).unwrap_or("");
+            let image_attrs = image_caps
+                .name("attrs")
+                .map(|value| value.as_str())
+                .unwrap_or("");
             let top = attr(image_attrs, "top")
                 .and_then(|value| value.parse::<i32>().ok())
                 .unwrap_or_default();
@@ -207,6 +247,9 @@ fn parse_layout_images(layout: &str, base_dir: &Path) -> Result<Vec<InlinePng>> 
             let display_height = attr(image_attrs, "height")
                 .and_then(|value| value.parse::<u32>().ok())
                 .unwrap_or_default();
+            if top < header_cutoff {
+                continue;
+            }
             let Some(src) = attr(image_attrs, "src") else {
                 continue;
             };
@@ -216,11 +259,19 @@ fn parse_layout_images(layout: &str, base_dir: &Path) -> Result<Vec<InlinePng>> 
             }
 
             let reader = ImageReader::open(&source_path)
-                .with_context(|| format!("Bild konnte nicht geöffnet werden: {}", source_path.display()))?
+                .with_context(|| {
+                    format!(
+                        "Bild konnte nicht geöffnet werden: {}",
+                        source_path.display()
+                    )
+                })?
                 .with_guessed_format()?;
-            let decoded = reader
-                .decode()
-                .with_context(|| format!("Bild konnte nicht dekodiert werden: {}", source_path.display()))?;
+            let decoded = reader.decode().with_context(|| {
+                format!(
+                    "Bild konnte nicht dekodiert werden: {}",
+                    source_path.display()
+                )
+            })?;
             if decoded.width() < 32
                 || decoded.height() < 32
                 || display_width < 24
@@ -422,6 +473,32 @@ mod tests {
         let images = parse_layout_images(xml, dir.path()).unwrap();
         assert_eq!(images.len(), 2);
         assert_eq!(images[1].target_oz.as_deref(), Some("01.01.01.010"));
+    }
+
+    #[test]
+    fn ignores_logo_above_table_header() {
+        let dir = tempdir().unwrap();
+        let logo = dir.path().join("layout-1_1.png");
+        let content = dir.path().join("layout-1_2.png");
+        image::DynamicImage::new_rgb8(100, 80)
+            .save_with_format(&logo, ImageFormat::Png)
+            .unwrap();
+        image::DynamicImage::new_rgb8(100, 80)
+            .save_with_format(&content, ImageFormat::Png)
+            .unwrap();
+        let xml = r#"<pdf2xml>
+<page number="1" height="1262">
+  <image top="30" width="77" height="77" src="layout-1_1.png"/>
+  <text top="203" height="17">OZ</text>
+  <text top="221" height="17">in EUR</text>
+  <text top="300">01.01.01.010 Leistung</text>
+  <image top="420" width="297" height="100" src="layout-1_2.png"/>
+</page>
+</pdf2xml>"#;
+
+        let images = parse_layout_images(xml, dir.path()).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].top, 420);
     }
 
     #[test]
