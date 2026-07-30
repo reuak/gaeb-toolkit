@@ -469,16 +469,39 @@ async fn cleanup_expired_jobs(state: &AppState) -> Result<()> {
 }
 
 fn safe_filename(value: &str) -> String {
-    Path::new(value)
+    let source = Path::new(value)
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("leistungsverzeichnis.pdf")
-        .chars()
-        .filter(|character| {
-            character.is_alphanumeric() || matches!(character, '.' | '-' | '_' | ' ')
-        })
-        .take(160)
-        .collect()
+        .unwrap_or("leistungsverzeichnis.pdf");
+    let mut filename = String::with_capacity(source.len());
+    for character in source.chars() {
+        let replacement = match character {
+            'ä' => "ae",
+            'ö' => "oe",
+            'ü' => "ue",
+            'Ä' => "Ae",
+            'Ö' => "Oe",
+            'Ü' => "Ue",
+            'ß' => "ss",
+            _ if character.is_ascii_alphanumeric()
+                || matches!(character, '.' | '-' | '_' | ' ') =>
+            {
+                filename.push(character);
+                continue;
+            }
+            _ => continue,
+        };
+        filename.push_str(replacement);
+        if filename.len() >= 160 {
+            break;
+        }
+    }
+    filename.truncate(filename.len().min(160));
+    if filename.trim_matches(['.', ' ']).is_empty() {
+        "leistungsverzeichnis.pdf".to_owned()
+    } else {
+        filename
+    }
 }
 
 fn output_filename(input: &str) -> String {
@@ -548,5 +571,18 @@ impl IntoResponse for ApiError {
             }),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_filename;
+
+    #[test]
+    fn output_filename_is_ascii_safe_for_http_headers() {
+        assert_eq!(
+            output_filename("Angebot Außenputz Prüffläche.pdf"),
+            "Angebot Aussenputz Pruefflaeche.x83"
+        );
     }
 }
