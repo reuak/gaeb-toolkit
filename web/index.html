@@ -9,14 +9,15 @@
     />
     <meta name="theme-color" content="#f4f2e9" />
     <title>LV Konverter · PDF und GAEB lesbar austauschen</title>
+    <link rel="icon" type="image/png" href="/assets/gaeb-konverter-icon.png" />
     <link rel="stylesheet" href="/styles.css" />
     <script src="/app.js" defer></script>
   </head>
   <body>
     <header class="site-header">
       <a class="brand" href="/" aria-label="LV Konverter Startseite">
-        <span class="brand-mark">LV</span>
-        <span>Konverter</span>
+        <span class="brand-mark"><img src="/assets/gaeb-konverter-icon.png" alt="" /></span>
+        <span>GAEB Konverter</span>
       </a>
       <div class="header-note">PDF ↔ GAEB DA XML 3.3</div>
     </header>
@@ -183,12 +184,31 @@
         </div>
         <span class="coming-soon">In Vorbereitung</span>
       </section>
+
+      <section class="legal-panel" id="impressum" aria-labelledby="legal-title">
+        <div class="legal-heading">
+          <div>
+            <p class="eyebrow">Rechtliche Angaben</p>
+            <h2 id="legal-title">Betreiberangaben</h2>
+          </div>
+          <a class="logo-download" href="/assets/gaeb-konverter-logo.png" download>
+            Logo als PNG herunterladen
+          </a>
+        </div>
+        <div id="imprint-content" class="imprint-grid" aria-live="polite">
+          <p>Betreiberangaben werden geladen …</p>
+        </div>
+        <p class="legal-source">
+          Automatisch übernommen vom
+          <a id="imprint-source" href="https://www.hawkvision.de/impressum/">Hawk-Vision-Impressum</a>.
+        </p>
+      </section>
     </main>
 
     <footer>
       <span>© <span id="year"></span> LV Konverter</span>
       <nav aria-label="Rechtliches">
-        <a href="https://www.hawkvision.de/impressum/">Impressum</a>
+        <a href="#impressum">Impressum</a>
         <a href="https://www.hawkvision.de/privacy-policy/">Datenschutz</a>
       </nav>
     </footer>

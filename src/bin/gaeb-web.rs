@@ -4,7 +4,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -26,14 +26,17 @@ use lettre::{
     Message, SmtpTransport, Transport,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use scraper::{Html, Selector};
 use serde::Serialize;
-use tokio::{fs, net::TcpListener, task};
+use tokio::{fs, net::TcpListener, sync::RwLock, task};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 const DEFAULT_MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
+const IMPRINT_URL: &str = "https://www.hawkvision.de/impressum/";
+const IMPRINT_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
 #[derive(Clone)]
 struct AppState {
@@ -44,6 +47,14 @@ struct AppState {
     retention_hours: i64,
     diagnostic_retention_days: i64,
     smtp: Option<SmtpConfig>,
+    http_client: reqwest::Client,
+    imprint_cache: Arc<RwLock<Option<CachedImprint>>>,
+}
+
+#[derive(Clone)]
+struct CachedImprint {
+    sections: Vec<ImprintSection>,
+    cached_at: Instant,
 }
 
 #[derive(Clone)]
@@ -90,6 +101,18 @@ struct ErrorResponse {
     error: String,
 }
 
+#[derive(Clone, Serialize)]
+struct ImprintSection {
+    heading: String,
+    lines: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ImprintResponse {
+    sections: Vec<ImprintSection>,
+    source_url: &'static str,
+}
+
 struct JobRecord {
     id: String,
     token: String,
@@ -120,6 +143,11 @@ async fn main() -> Result<()> {
         retention_hours: env_i64("RETENTION_HOURS", 24),
         diagnostic_retention_days: env_i64("DIAGNOSTIC_RETENTION_DAYS", 30),
         smtp: smtp_config(),
+        http_client: reqwest::Client::builder()
+            .user_agent("GAEB-Konverter/0.1 (+https://gaeb.hawk-vision.de)")
+            .timeout(Duration::from_secs(12))
+            .build()?,
+        imprint_cache: Arc::new(RwLock::new(None)),
     });
     init_database(&state)?;
 
@@ -137,6 +165,7 @@ async fn main() -> Result<()> {
         .route("/health", get(health))
         .route("/api/convert", post(create_job))
         .route("/api/gaeb-to-pdf", post(gaeb_to_pdf))
+        .route("/api/legal/imprint", get(imprint))
         .route("/api/jobs/{id}", get(job_status))
         .route("/download/{id}/{token}", get(download))
         .fallback_service(ServeDir::new("web").append_index_html_on_directories(true))
@@ -154,6 +183,110 @@ async fn main() -> Result<()> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn imprint(State(state): State<Arc<AppState>>) -> Result<Json<ImprintResponse>, ApiError> {
+    if let Some(cached) = state.imprint_cache.read().await.as_ref() {
+        if cached.cached_at.elapsed() < IMPRINT_CACHE_TTL {
+            return Ok(Json(ImprintResponse {
+                sections: cached.sections.clone(),
+                source_url: IMPRINT_URL,
+            }));
+        }
+    }
+
+    let fetched = state.http_client.get(IMPRINT_URL).send().await;
+    let sections = match fetched {
+        Ok(response) if response.status().is_success() => {
+            let body = response.text().await.map_err(|error| {
+                error!(%error, "imprint response could not be read");
+                ApiError::upstream("Das Impressum konnte vorübergehend nicht geladen werden.")
+            })?;
+            extract_imprint_sections(&body).ok_or_else(|| {
+                error!("imprint structure was not recognized");
+                ApiError::upstream("Das Impressum konnte vorübergehend nicht geladen werden.")
+            })?
+        }
+        Ok(response) => {
+            error!(status = %response.status(), "imprint request failed");
+            stale_imprint(&state).await?
+        }
+        Err(error) => {
+            error!(%error, "imprint request failed");
+            stale_imprint(&state).await?
+        }
+    };
+
+    *state.imprint_cache.write().await = Some(CachedImprint {
+        sections: sections.clone(),
+        cached_at: Instant::now(),
+    });
+    Ok(Json(ImprintResponse {
+        sections,
+        source_url: IMPRINT_URL,
+    }))
+}
+
+async fn stale_imprint(state: &AppState) -> Result<Vec<ImprintSection>, ApiError> {
+    state
+        .imprint_cache
+        .read()
+        .await
+        .as_ref()
+        .map(|cached| cached.sections.clone())
+        .ok_or_else(|| {
+            ApiError::upstream("Das Impressum konnte vorübergehend nicht geladen werden.")
+        })
+}
+
+fn extract_imprint_sections(body: &str) -> Option<Vec<ImprintSection>> {
+    let document = Html::parse_document(body);
+    let block_selector = Selector::parse(".thrv_text_element").ok()?;
+    let heading_selector = Selector::parse("h3").ok()?;
+    let mut sections = Vec::new();
+    let mut started = false;
+
+    for block in document.select(&block_selector) {
+        let Some(heading_node) = block.select(&heading_selector).next() else {
+            continue;
+        };
+        let heading = normalized_text(heading_node.text());
+        if heading.contains("Seitenbetreiber") {
+            started = true;
+        }
+        if !started {
+            continue;
+        }
+        if heading.eq_ignore_ascii_case("unsere Unternehmensbereiche") {
+            break;
+        }
+
+        let heading_text = normalized_text(heading_node.text());
+        let mut values = block
+            .text()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if values.first().is_some_and(|value| *value == heading_text) {
+            values.remove(0);
+        }
+        if !heading_text.is_empty() && !values.is_empty() {
+            sections.push(ImprintSection {
+                heading: heading_text,
+                lines: values,
+            });
+        }
+    }
+
+    (sections.len() >= 3).then_some(sections)
+}
+
+fn normalized_text<'a>(parts: impl Iterator<Item = &'a str>) -> String {
+    parts
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 async fn gaeb_to_pdf(
@@ -880,6 +1013,10 @@ impl ApiError {
             "Der Auftrag konnte nicht verarbeitet werden.",
         )
     }
+
+    fn upstream(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_GATEWAY, message)
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -901,7 +1038,29 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use super::{init_database, output_filename, AppState};
+    use super::{extract_imprint_sections, init_database, output_filename, AppState};
+
+    #[test]
+    fn imprint_extraction_omits_page_title_and_following_company_area() {
+        let html = r#"
+          <h1>Impressum</h1>
+          <div class="thrv_text_element"><h3>Seitenbetreiber/ Verantwortlicher</h3>Hawk Vision GmbH<br>Tulpenweg 2</div>
+          <div class="thrv_text_element"><h3>Kontaktdaten</h3><p>office@example.de<br>Telefon: 123</p></div>
+          <div class="thrv_text_element"><h3>Unternehmensangaben</h3><p>Amtsgericht Jena</p></div>
+          <div class="thrv_text_element"><h3>Quellenangaben</h3><p>finden Sie hier</p></div>
+          <div class="thrv_text_element"><h3>unsere Unternehmensbereiche</h3><p>Nicht übernehmen</p></div>
+        "#;
+        let sections = extract_imprint_sections(html).unwrap();
+        assert_eq!(sections.len(), 4);
+        assert_eq!(sections[0].heading, "Seitenbetreiber/ Verantwortlicher");
+        assert!(sections
+            .iter()
+            .all(|section| section.heading != "Impressum"));
+        assert!(sections.iter().all(|section| !section
+            .lines
+            .iter()
+            .any(|line| line.contains("Nicht übernehmen"))));
+    }
 
     #[test]
     fn output_filename_is_ascii_safe_for_http_headers() {
@@ -943,6 +1102,8 @@ mod tests {
             retention_hours: 24,
             diagnostic_retention_days: 30,
             smtp: None,
+            http_client: reqwest::Client::new(),
+            imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
         });
         init_database(&state).unwrap();
 

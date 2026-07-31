@@ -18,6 +18,34 @@ const gaebFileMeta = document.querySelector("#gaeb-file-meta");
 
 document.querySelector("#year").textContent = new Date().getFullYear();
 
+async function loadImprint() {
+  const container = document.querySelector("#imprint-content");
+  const source = document.querySelector("#imprint-source");
+  try {
+    const response = await fetch("/api/legal/imprint");
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Impressum nicht verfügbar.");
+    container.replaceChildren();
+    for (const section of data.sections) {
+      const article = document.createElement("article");
+      const heading = document.createElement("h3");
+      heading.textContent = section.heading;
+      article.appendChild(heading);
+      for (const line of section.lines) {
+        const paragraph = document.createElement("p");
+        paragraph.textContent = line;
+        article.appendChild(paragraph);
+      }
+      container.appendChild(article);
+    }
+    source.href = data.source_url;
+  } catch (error) {
+    container.textContent = "Die Betreiberangaben konnten nicht automatisch geladen werden. Bitte öffnen Sie das verlinkte Original-Impressum.";
+  }
+}
+
+loadImprint();
+
 function showFile(file) {
   if (!file) return;
   fileTitle.textContent = file.name;

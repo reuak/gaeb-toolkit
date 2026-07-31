@@ -17,7 +17,9 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 printpdf = { version = "0.7", default-features = false }
 quick-xml = { version = "0.37", features = ["serialize"] }
 regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+scraper = "0.22"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
