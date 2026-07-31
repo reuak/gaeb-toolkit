@@ -26,6 +26,11 @@ body {
 
 button, input { font: inherit; }
 a { color: inherit; }
+button, a, .file-drop { touch-action: manipulation; }
+:focus-visible {
+  outline: 3px solid rgba(198, 91, 37, 0.5);
+  outline-offset: 3px;
+}
 
 .site-header {
   width: min(1180px, calc(100% - 40px));
@@ -240,21 +245,42 @@ h1 {
 }
 .primary-button:hover, .download-button:hover { background: var(--green-dark); transform: translateY(-1px); }
 .primary-button:disabled { cursor: wait; opacity: 0.65; }
+.primary-button[aria-busy="true"] { cursor: progress; }
 .secondary-button { margin-top: 10px; background: #edf0eb; color: var(--ink); }
 .form-note { margin: 10px 0 0; color: #78847f; text-align: center; font-size: 10px; }
 
 .gaeb-reader {
+  position: relative;
   width: min(1180px, calc(100% - 40px));
   margin: 0 auto 80px;
   padding: 42px;
-  border: 1px solid var(--line);
+  overflow: hidden;
+  border: 1px solid rgba(198, 91, 37, 0.28);
   border-radius: 24px;
-  background: #fffdf8;
+  background:
+    radial-gradient(circle at 94% 8%, rgba(235, 139, 67, 0.2), transparent 34%),
+    #fff8f1;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(320px, 0.75fr);
   gap: 55px;
   align-items: center;
 }
+.gaeb-reader::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  background: linear-gradient(90deg, #b8481d, #f19a45);
+}
+.gaeb-reader .eyebrow { color: #aa431d; }
+.gaeb-reader .file-drop {
+  border-color: rgba(198, 91, 37, 0.28);
+  background: rgba(255, 255, 255, 0.72);
+}
+.gaeb-reader .file-drop:hover { border-color: #c65b25; background: #fff; }
+.gaeb-reader .file-icon { background: #f7dfcc; color: #9e3e18; }
+.orange-button { background: #c65b25; }
+.orange-button:hover { background: #9e3e18; }
 .gaeb-reader h2 { margin: 5px 0 15px; font-size: clamp(34px, 4vw, 55px); }
 .gaeb-reader p { color: var(--muted); line-height: 1.65; }
 .compact-file-drop { min-height: 150px; margin-bottom: 14px; }
@@ -288,6 +314,10 @@ h1 {
   display: grid;
   grid-template-columns: 0.65fr 1.35fr;
   gap: 70px;
+}
+.how-it-works, .gaeb-reader, .paid-preview, footer {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 520px;
 }
 .how-it-works ol {
   margin: 0;

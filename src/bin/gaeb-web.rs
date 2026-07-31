@@ -25,7 +25,7 @@ use lettre::{
     transport::smtp::authentication::Credentials,
     Message, SmtpTransport, Transport,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use tokio::{fs, net::TcpListener, task};
 use tower_http::{services::ServeDir, trace::TraceLayer};
@@ -265,22 +265,6 @@ async fn create_job(
     }
 
     validate_form(&form, &state)?;
-    let state_for_limit = state.clone();
-    let email_for_limit = form.email.clone();
-    let used_today = task::spawn_blocking(move || daily_usage(&state_for_limit, &email_for_limit))
-        .await
-        .map_err(|_| ApiError::internal())?
-        .map_err(|_| ApiError::internal())?;
-    if used_today >= state.daily_limit {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "Das kostenlose Tageslimit von {} Konvertierungen ist erreicht.",
-                state.daily_limit
-            ),
-        ));
-    }
-
     let id = Uuid::new_v4().simple().to_string();
     let token = Uuid::new_v4().simple().to_string();
     let job_dir = state.data_dir.join("jobs").join(&id);
@@ -297,8 +281,8 @@ async fn create_job(
     let db_form = form;
     let db_id = id.clone();
     let db_token = token.clone();
-    task::spawn_blocking(move || {
-        insert_job(
+    let reserved = task::spawn_blocking(move || {
+        reserve_job(
             &db_state,
             &db_id,
             &db_token,
@@ -309,6 +293,16 @@ async fn create_job(
     .await
     .map_err(|_| ApiError::internal())?
     .map_err(|_| ApiError::internal())?;
+    if !reserved {
+        let _ = fs::remove_dir_all(&job_dir).await;
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "Das kostenlose Tageslimit von {} Konvertierungen ist erreicht.",
+                state.daily_limit
+            ),
+        ));
+    }
 
     let worker_state = state.clone();
     let worker_id = id.clone();
@@ -486,6 +480,7 @@ fn init_database(state: &AppState) -> Result<()> {
     let connection = Connection::open(&state.db_path)?;
     connection.execute_batch(
         "PRAGMA journal_mode=WAL;
+         PRAGMA busy_timeout=5000;
          CREATE TABLE IF NOT EXISTS jobs (
            id TEXT PRIMARY KEY,
            token TEXT NOT NULL,
@@ -523,6 +518,13 @@ fn init_database(state: &AppState) -> Result<()> {
     )?;
     ensure_job_column(&connection, "email_fallback_consent_at", "TEXT")?;
     ensure_job_column(&connection, "feature_updates_consent_at", "TEXT")?;
+    connection.execute(
+        "UPDATE jobs
+         SET status = 'failed',
+             error = 'Die Verarbeitung wurde durch einen Server-Neustart unterbrochen. Bitte erneut hochladen.'
+         WHERE status IN ('queued', 'processing')",
+        [],
+    )?;
     Ok(())
 }
 
@@ -540,16 +542,27 @@ fn ensure_job_column(connection: &Connection, name: &str, definition: &str) -> R
     Ok(())
 }
 
-fn insert_job(
+fn reserve_job(
     state: &AppState,
     id: &str,
     token: &str,
     form: &UploadForm,
     expires_at: &str,
-) -> Result<()> {
-    let connection = Connection::open(&state.db_path)?;
+) -> Result<bool> {
+    let mut connection = Connection::open(&state.db_path)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let used_today: u32 = transaction.query_row(
+        "SELECT COUNT(*) FROM jobs
+         WHERE email = ?1 AND date(created_at) = date('now')",
+        [&form.email],
+        |row| row.get(0),
+    )?;
+    if used_today >= state.daily_limit {
+        return Ok(false);
+    }
     let now = Utc::now().to_rfc3339();
-    connection.execute(
+    transaction.execute(
         "INSERT INTO jobs
          (id, token, email, contact_name, company, phone, filename, status,
           email_fallback_consent, feature_updates_consent,
@@ -572,7 +585,7 @@ fn insert_job(
         ],
     )?;
     if form.feature_updates_consent {
-        connection.execute(
+        transaction.execute(
             "INSERT INTO feature_subscriptions (email, contact_name, consent_at, source)
              VALUES (?1, ?2, ?3, 'gaeb-web')
              ON CONFLICT(email) DO UPDATE SET
@@ -582,18 +595,8 @@ fn insert_job(
             params![form.email, form.contact_name, Utc::now().to_rfc3339()],
         )?;
     }
-    Ok(())
-}
-
-fn daily_usage(state: &AppState, email: &str) -> Result<u32> {
-    let connection = Connection::open(&state.db_path)?;
-    let count = connection.query_row(
-        "SELECT COUNT(*) FROM jobs
-         WHERE email = ?1 AND date(created_at) = date('now')",
-        [email],
-        |row| row.get(0),
-    )?;
-    Ok(count)
+    transaction.commit()?;
+    Ok(true)
 }
 
 fn load_job(state: &AppState, id: &str, token: &str) -> Result<Option<JobRecord>> {

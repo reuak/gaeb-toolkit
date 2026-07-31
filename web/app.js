@@ -57,6 +57,7 @@ form.addEventListener("submit", async (event) => {
 
   const submit = form.querySelector("button[type=submit]");
   submit.disabled = true;
+  submit.setAttribute("aria-busy", "true");
   try {
     const response = await fetch("/api/convert", {
       method: "POST",
@@ -67,9 +68,11 @@ form.addEventListener("submit", async (event) => {
     form.hidden = true;
     jobPanel.hidden = false;
     await pollJob(data.id, data.token);
+    submit.removeAttribute("aria-busy");
   } catch (error) {
     showError(error.message);
     submit.disabled = false;
+    submit.removeAttribute("aria-busy");
   }
 });
 
@@ -163,6 +166,7 @@ gaebReaderForm.addEventListener("submit", async (event) => {
 
   const submit = gaebReaderForm.querySelector("button[type=submit]");
   submit.disabled = true;
+  submit.setAttribute("aria-busy", "true");
   gaebFileMeta.style.color = "";
   gaebFileMeta.textContent = "PDF wird erstellt …";
   try {
@@ -189,5 +193,6 @@ gaebReaderForm.addEventListener("submit", async (event) => {
     gaebFileMeta.style.color = "var(--error)";
   } finally {
     submit.disabled = false;
+    submit.removeAttribute("aria-busy");
   }
 });
