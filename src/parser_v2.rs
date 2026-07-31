@@ -37,6 +37,8 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     let six_part_profile_re = Regex::new(r"(?m)^\s*\d+(?:\.\d+){5}\s+\S")?;
     let six_part_profile = six_part_profile_re.is_match(text);
     let priced_data_re = priced_data_regex()?;
+    let short_four_part_profile =
+        has_short_four_part_positions(text, &position_start_re, &priced_data_re);
     let sum_re = Regex::new(r"^Summe\s+\d+(?:\.\d+){1,5}\.?(?:\s|$)")?;
     let footer_re = Regex::new(r"^Druckausgabe vom:.*\d+\s*/\s*\d+\s*$")?;
 
@@ -62,7 +64,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
 
             if let Some(caps) = position_start_re
                 .captures(&line)
-                .filter(|caps| is_position_oz(caps, six_part_profile))
+                .filter(|caps| is_position_oz(caps, six_part_profile, short_four_part_profile))
             {
                 finish_position(
                     &mut boq,
@@ -167,13 +169,64 @@ fn trailing_quantity_regex() -> Result<Regex, regex::Error> {
     )
 }
 
-fn is_position_oz(caps: &regex::Captures<'_>, six_part_profile: bool) -> bool {
+fn has_short_four_part_positions(
+    text: &str,
+    position_start_re: &Regex,
+    priced_data_re: &Regex,
+) -> bool {
+    let quantity_re = match trailing_quantity_regex() {
+        Ok(regex) => regex,
+        Err(_) => return false,
+    };
+    let lines = text
+        .lines()
+        .map(normalize_line)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    for (index, line) in lines.iter().enumerate() {
+        let Some(caps) = position_start_re.captures(line) else {
+            continue;
+        };
+        let components = caps["oz"].split('.').collect::<Vec<_>>();
+        if components.len() != 4
+            || caps.name("trailing").is_none()
+            || components.iter().any(|component| component.len() > 2)
+        {
+            continue;
+        }
+        if caps
+            .name("rest")
+            .is_some_and(|rest| priced_data_re.is_match(rest.as_str()))
+        {
+            return true;
+        }
+        for following in &lines[index + 1..] {
+            if position_start_re.is_match(following) {
+                break;
+            }
+            if quantity_re.is_match(following) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_position_oz(
+    caps: &regex::Captures<'_>,
+    six_part_profile: bool,
+    short_four_part_profile: bool,
+) -> bool {
     let components = caps["oz"].split('.').collect::<Vec<_>>();
     if is_date_like_oz(&components) {
         return false;
     }
     if six_part_profile {
         return components.len() == 6;
+    }
+    if short_four_part_profile {
+        return components.len() == 4;
     }
     match components.len() {
         3 => caps.name("trailing").is_some() || components[2].len() >= 3,
@@ -573,6 +626,45 @@ mod tests {
         assert_eq!(position.unit.as_deref(), Some("m²"));
         assert_eq!(position.unit_price, Some(Decimal::new(940, 2)));
         assert_eq!(position.total_price, Some(Decimal::new(488800, 2)));
+    }
+
+    #[test]
+    fn distinguishes_short_four_part_items_from_three_part_headings_and_summary() {
+        let text = "\
+3.8.1. Vorbereitende Arbeiten
+3.8.1.1. Abdeckarbeiten als besondere Leistung
+Abdeckarbeiten für die gesamten Malerarbeiten
+1,000 psch ......................... .........................
+Summe 3.8.1. Vorbereitende Arbeiten .........................
+3.8.2. Dispersionsanstriche
+3.8.2.1. Grundierung Wände und Decken
+1.075,000 m² ......................... .........................
+3.8.1. Vorbereitende Arbeiten .........................
+3.8.2. Dispersionsanstriche .........................
+";
+        let boq = parse_text("test.txt", text).unwrap();
+        let positions = boq
+            .roots
+            .iter()
+            .flat_map(|root| &root.children)
+            .flat_map(|title| &title.children)
+            .flat_map(|subtitle| &subtitle.positions)
+            .collect::<Vec<_>>();
+
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0].oz, "3.8.1.1");
+        assert_eq!(positions[0].quantity, Some(Decimal::new(1000, 3)));
+        assert_eq!(positions[1].oz, "3.8.2.1");
+        assert_eq!(positions[1].quantity, Some(Decimal::new(1075000, 3)));
+        assert!(
+            boq.warnings.iter().all(|warning| {
+                !warning.starts_with("Doppelte OZ:")
+                    && !warning.starts_with("Menge fehlt:")
+                    && !warning.starts_with("Einheit fehlt:")
+            }),
+            "{:?}",
+            boq.warnings
+        );
     }
 
     #[test]

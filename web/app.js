@@ -112,6 +112,8 @@ function showError(message) {
 function showJobError(message) {
   form.hidden = true;
   jobPanel.hidden = false;
+  downloadButton.hidden = true;
+  downloadButton.removeAttribute("href");
   spinner.className = "spinner is-error";
   jobKicker.textContent = "Konvertierung nicht möglich";
   jobTitle.textContent = "Das PDF muss geprüft werden.";
