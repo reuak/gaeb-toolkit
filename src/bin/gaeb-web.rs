@@ -17,7 +17,14 @@ use axum::{
     Json, Router,
 };
 use chrono::{Duration as ChronoDuration, Utc};
-use gaeb_toolkit::{apply_provisional_flags, inject_pdf_pngs, parse_pdf, write_x83};
+use gaeb_toolkit::{
+    apply_provisional_flags, inject_pdf_pngs, parse_pdf, read_gaeb_xml, write_gaeb_pdf, write_x83,
+};
+use lettre::{
+    message::{header::ContentType, Attachment, MultiPart, SinglePart},
+    transport::smtp::authentication::Credentials,
+    Message, SmtpTransport, Transport,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use tokio::{fs, net::TcpListener, task};
@@ -35,6 +42,17 @@ struct AppState {
     daily_limit: u32,
     max_upload_bytes: usize,
     retention_hours: i64,
+    diagnostic_retention_days: i64,
+    smtp: Option<SmtpConfig>,
+}
+
+#[derive(Clone)]
+struct SmtpConfig {
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+    from: String,
 }
 
 #[derive(Default)]
@@ -44,6 +62,8 @@ struct UploadForm {
     company: String,
     phone: String,
     consent: bool,
+    email_fallback_consent: bool,
+    feature_updates_consent: bool,
     filename: String,
     pdf: Vec<u8>,
 }
@@ -77,6 +97,9 @@ struct JobRecord {
     status: String,
     error: Option<String>,
     expires_at: String,
+    email: String,
+    contact_name: String,
+    email_fallback_consent: bool,
 }
 
 #[tokio::main]
@@ -95,6 +118,8 @@ async fn main() -> Result<()> {
         daily_limit: env_u32("DAILY_LIMIT", 2),
         max_upload_bytes: env_usize("MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES),
         retention_hours: env_i64("RETENTION_HOURS", 24),
+        diagnostic_retention_days: env_i64("DIAGNOSTIC_RETENTION_DAYS", 30),
+        smtp: smtp_config(),
     });
     init_database(&state)?;
 
@@ -111,6 +136,7 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/convert", post(create_job))
+        .route("/api/gaeb-to-pdf", post(gaeb_to_pdf))
         .route("/api/jobs/{id}", get(job_status))
         .route("/download/{id}/{token}", get(download))
         .fallback_service(ServeDir::new("web").append_index_html_on_directories(true))
@@ -128,6 +154,71 @@ async fn main() -> Result<()> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn gaeb_to_pdf(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<Response, ApiError> {
+    let mut filename = "leistungsverzeichnis.x83".to_owned();
+    let mut gaeb = Vec::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| ApiError::bad_request("GAEB-Upload konnte nicht gelesen werden."))?
+    {
+        if field.name() == Some("gaeb") {
+            filename = field.file_name().unwrap_or(&filename).to_owned();
+            gaeb = field
+                .bytes()
+                .await
+                .map_err(|_| ApiError::bad_request("GAEB-Datei konnte nicht gelesen werden."))?
+                .to_vec();
+        }
+    }
+    if gaeb.is_empty() {
+        return Err(ApiError::bad_request("Bitte eine GAEB-Datei auswählen."));
+    }
+    if gaeb.len() > state.max_upload_bytes {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Die GAEB-Datei ist größer als 2 MB.",
+        ));
+    }
+    let input_name = safe_filename(&filename);
+    let output_name = format!(
+        "{}.pdf",
+        safe_filename(
+            Path::new(&filename)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("leistungsverzeichnis")
+        )
+    );
+    let bytes = task::spawn_blocking(move || -> Result<Vec<u8>> {
+        let directory = tempfile::tempdir()?;
+        let input = directory.path().join(input_name);
+        let output = directory.path().join("leistungsverzeichnis.pdf");
+        std::fs::write(&input, gaeb)?;
+        let document = read_gaeb_xml(&input)?;
+        write_gaeb_pdf(&document, &output)?;
+        Ok(std::fs::read(output)?)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+    .map_err(|error| ApiError::bad_request(format!("GAEB-Datei nicht lesbar: {error}")))?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/pdf"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{output_name}\""))
+            .map_err(|_| ApiError::internal())?,
+    );
+    Ok((headers, Body::from(bytes)).into_response())
 }
 
 async fn create_job(
@@ -162,6 +253,12 @@ async fn create_job(
                 "company" => form.company = value.trim().to_owned(),
                 "phone" => form.phone = value.trim().to_owned(),
                 "consent" => form.consent = value == "true" || value == "on",
+                "email_fallback_consent" => {
+                    form.email_fallback_consent = value == "true" || value == "on"
+                }
+                "feature_updates_consent" => {
+                    form.feature_updates_consent = value == "true" || value == "on"
+                }
                 _ => {}
             }
         }
@@ -294,19 +391,62 @@ async fn download(
 
 async fn process_job(state: Arc<AppState>, id: String) -> Result<()> {
     set_job_status(&state, &id, "processing")?;
+    let worker_state = state.clone();
+    let worker_id = id.clone();
+    let record =
+        task::spawn_blocking(move || load_job_for_worker(&worker_state, &worker_id)).await??;
     let input = state.data_dir.join("jobs").join(&id).join("input.pdf");
     let output = state.data_dir.join("jobs").join(&id).join("output.x83");
+    let report = state
+        .data_dir
+        .join("jobs")
+        .join(&id)
+        .join("fehlerprotokoll.txt");
     let processing_input = input.clone();
     let processing_output = output.clone();
-    task::spawn_blocking(move || -> Result<()> {
+    let processing_report = report.clone();
+    let smtp = state.smtp.clone();
+    let emailed_with_warnings = task::spawn_blocking(move || -> Result<bool> {
         let boq = parse_pdf(&processing_input)?;
-        write_x83(&boq, &processing_output, false)?;
-        inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
-        apply_provisional_flags(&processing_output, &boq)?;
-        Ok(())
+        match write_x83(&boq, &processing_output, false) {
+            Ok(()) => {
+                inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
+                apply_provisional_flags(&processing_output, &boq)?;
+                Ok(false)
+            }
+            Err(error) if record.email_fallback_consent => {
+                write_x83(&boq, &processing_output, true)?;
+                inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
+                apply_provisional_flags(&processing_output, &boq)?;
+                let report_text = format!(
+                    "PRÜFPFLICHTIGER X83-ENTWURF\n\
+                     ===========================\n\n\
+                     Der sichere Export wurde wegen folgender Konflikte blockiert.\n\
+                     Die beigefügte X83 wurde fehlertolerant erzeugt und muss vor jeder\n\
+                     weiteren Verwendung fachlich geprüft werden.\n\n{error}\n"
+                );
+                std::fs::write(&processing_report, &report_text)?;
+                let smtp = smtp.context(
+                    "E-Mail-Versand ist nicht konfiguriert. Bitte SMTP_* Variablen setzen.",
+                )?;
+                send_fallback_email(
+                    &smtp,
+                    &record,
+                    &processing_input,
+                    &processing_output,
+                    &processing_report,
+                )?;
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
     })
     .await??;
-    set_job_status(&state, &id, "ready")?;
+    if emailed_with_warnings {
+        set_job_emailed_with_warnings(&state, &id, state.diagnostic_retention_days)?;
+    } else {
+        set_job_status(&state, &id, "ready")?;
+    }
     Ok(())
 }
 
@@ -356,11 +496,47 @@ fn init_database(state: &AppState) -> Result<()> {
            filename TEXT NOT NULL,
            status TEXT NOT NULL,
            error TEXT,
+           email_fallback_consent INTEGER NOT NULL DEFAULT 0,
+           feature_updates_consent INTEGER NOT NULL DEFAULT 0,
+           email_fallback_consent_at TEXT,
+           feature_updates_consent_at TEXT,
            created_at TEXT NOT NULL,
            expires_at TEXT NOT NULL
          );
-         CREATE INDEX IF NOT EXISTS jobs_email_created ON jobs(email, created_at);",
+         CREATE INDEX IF NOT EXISTS jobs_email_created ON jobs(email, created_at);
+         CREATE TABLE IF NOT EXISTS feature_subscriptions (
+           email TEXT PRIMARY KEY,
+           contact_name TEXT NOT NULL,
+           consent_at TEXT NOT NULL,
+           source TEXT NOT NULL
+         );",
     )?;
+    ensure_job_column(
+        &connection,
+        "email_fallback_consent",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_job_column(
+        &connection,
+        "feature_updates_consent",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_job_column(&connection, "email_fallback_consent_at", "TEXT")?;
+    ensure_job_column(&connection, "feature_updates_consent_at", "TEXT")?;
+    Ok(())
+}
+
+fn ensure_job_column(connection: &Connection, name: &str, definition: &str) -> Result<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(jobs)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == name) {
+        connection.execute(
+            &format!("ALTER TABLE jobs ADD COLUMN {name} {definition}"),
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -372,10 +548,13 @@ fn insert_job(
     expires_at: &str,
 ) -> Result<()> {
     let connection = Connection::open(&state.db_path)?;
+    let now = Utc::now().to_rfc3339();
     connection.execute(
         "INSERT INTO jobs
-         (id, token, email, contact_name, company, phone, filename, status, created_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9)",
+         (id, token, email, contact_name, company, phone, filename, status,
+          email_fallback_consent, feature_updates_consent,
+          email_fallback_consent_at, feature_updates_consent_at, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             id,
             token,
@@ -384,10 +563,25 @@ fn insert_job(
             form.company,
             form.phone,
             safe_filename(&form.filename),
-            Utc::now().to_rfc3339(),
+            form.email_fallback_consent,
+            form.feature_updates_consent,
+            form.email_fallback_consent.then_some(now.as_str()),
+            form.feature_updates_consent.then_some(now.as_str()),
+            now,
             expires_at,
         ],
     )?;
+    if form.feature_updates_consent {
+        connection.execute(
+            "INSERT INTO feature_subscriptions (email, contact_name, consent_at, source)
+             VALUES (?1, ?2, ?3, 'gaeb-web')
+             ON CONFLICT(email) DO UPDATE SET
+               contact_name = excluded.contact_name,
+               consent_at = excluded.consent_at,
+               source = excluded.source",
+            params![form.email, form.contact_name, Utc::now().to_rfc3339()],
+        )?;
+    }
     Ok(())
 }
 
@@ -406,7 +600,8 @@ fn load_job(state: &AppState, id: &str, token: &str) -> Result<Option<JobRecord>
     let connection = Connection::open(&state.db_path)?;
     connection
         .query_row(
-            "SELECT id, token, filename, status, error, expires_at
+            "SELECT id, token, filename, status, error, expires_at,
+                    email, contact_name, email_fallback_consent
              FROM jobs
              WHERE id = ?1 AND token = ?2 AND expires_at > ?3",
             params![id, token, Utc::now().to_rfc3339()],
@@ -418,6 +613,9 @@ fn load_job(state: &AppState, id: &str, token: &str) -> Result<Option<JobRecord>
                     status: row.get(3)?,
                     error: row.get(4)?,
                     expires_at: row.get(5)?,
+                    email: row.get(6)?,
+                    contact_name: row.get(7)?,
+                    email_fallback_consent: row.get(8)?,
                 })
             },
         )
@@ -425,11 +623,50 @@ fn load_job(state: &AppState, id: &str, token: &str) -> Result<Option<JobRecord>
         .map_err(Into::into)
 }
 
+fn load_job_for_worker(state: &AppState, id: &str) -> Result<JobRecord> {
+    let connection = Connection::open(&state.db_path)?;
+    connection
+        .query_row(
+            "SELECT id, token, filename, status, error, expires_at,
+                    email, contact_name, email_fallback_consent
+             FROM jobs WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(JobRecord {
+                    id: row.get(0)?,
+                    token: row.get(1)?,
+                    filename: row.get(2)?,
+                    status: row.get(3)?,
+                    error: row.get(4)?,
+                    expires_at: row.get(5)?,
+                    email: row.get(6)?,
+                    contact_name: row.get(7)?,
+                    email_fallback_consent: row.get(8)?,
+                })
+            },
+        )
+        .context("Auftrag nicht gefunden")
+}
+
 fn set_job_status(state: &AppState, id: &str, status: &str) -> Result<()> {
     let connection = Connection::open(&state.db_path)?;
     connection.execute(
         "UPDATE jobs SET status = ?1, error = NULL WHERE id = ?2",
         params![status, id],
+    )?;
+    Ok(())
+}
+
+fn set_job_emailed_with_warnings(state: &AppState, id: &str, retention_days: i64) -> Result<()> {
+    let connection = Connection::open(&state.db_path)?;
+    let expires_at = (Utc::now() + ChronoDuration::days(retention_days)).to_rfc3339();
+    connection.execute(
+        "UPDATE jobs
+         SET status = 'emailed_with_warnings',
+             error = 'Prüfpflichtiger X83-Entwurf und Fehlerprotokoll wurden per E-Mail versendet.',
+             expires_at = ?1
+         WHERE id = ?2",
+        params![expires_at, id],
     )?;
     Ok(())
 }
@@ -442,6 +679,68 @@ fn set_job_failed(state: &AppState, id: &str) -> Result<()> {
          WHERE id = ?1",
         [id],
     )?;
+    Ok(())
+}
+
+fn send_fallback_email(
+    smtp: &SmtpConfig,
+    record: &JobRecord,
+    input: &Path,
+    output: &Path,
+    report: &Path,
+) -> Result<()> {
+    let pdf = std::fs::read(input)?;
+    let x83 = std::fs::read(output)?;
+    let log = std::fs::read(report)?;
+    let x83_name = format!("PRUEFEN_{}", output_filename(&record.filename));
+    let report_name = format!(
+        "{}_Fehlerprotokoll.txt",
+        safe_filename(
+            Path::new(&record.filename)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("leistungsverzeichnis")
+        )
+    );
+    let body = format!(
+        "Guten Tag {},\n\n\
+         der sichere X83-Export war wegen erkannter Konflikte nicht möglich.\n\
+         Auf Ihren Wunsch erhalten Sie:\n\
+         - das Original-PDF,\n\
+         - einen ausdrücklich prüfpflichtigen X83-Entwurf und\n\
+         - das Fehlerprotokoll.\n\n\
+         Verwenden Sie den X83-Entwurf erst nach fachlicher Prüfung.\n\
+         Die Diagnosedaten werden spätestens nach dem vereinbarten Zeitraum gelöscht.\n",
+        record.contact_name
+    );
+    let mixed = MultiPart::mixed()
+        .singlepart(
+            SinglePart::builder()
+                .header(ContentType::TEXT_PLAIN)
+                .body(body),
+        )
+        .singlepart(
+            Attachment::new(record.filename.clone())
+                .body(pdf, ContentType::parse("application/pdf")?),
+        )
+        .singlepart(Attachment::new(x83_name).body(x83, ContentType::parse("application/xml")?))
+        .singlepart(
+            Attachment::new(report_name)
+                .body(log, ContentType::parse("text/plain; charset=utf-8")?),
+        );
+    let message = Message::builder()
+        .from(smtp.from.parse()?)
+        .to(record.email.parse()?)
+        .subject("GAEB-Konvertierung: prüfpflichtiger X83-Entwurf")
+        .multipart(mixed)?;
+    let mut builder = SmtpTransport::relay(&smtp.host)?.port(smtp.port);
+    if !smtp.username.is_empty() {
+        builder = builder.credentials(Credentials::new(
+            smtp.username.clone(),
+            smtp.password.clone(),
+        ));
+    }
+    builder.build().send(&message)?;
     Ok(())
 }
 
@@ -533,6 +832,24 @@ fn env_i64(name: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
+fn smtp_config() -> Option<SmtpConfig> {
+    let host = env::var("SMTP_HOST").ok()?.trim().to_owned();
+    let from = env::var("SMTP_FROM").ok()?.trim().to_owned();
+    if host.is_empty() || from.is_empty() {
+        return None;
+    }
+    Some(SmtpConfig {
+        host,
+        port: env::var("SMTP_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(587),
+        username: env::var("SMTP_USERNAME").unwrap_or_default(),
+        password: env::var("SMTP_PASSWORD").unwrap_or_default(),
+        from,
+    })
+}
+
 struct ApiError {
     status: StatusCode,
     message: String,
@@ -576,7 +893,12 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::output_filename;
+    use std::sync::Arc;
+
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+
+    use super::{init_database, output_filename, AppState};
 
     #[test]
     fn output_filename_is_ascii_safe_for_http_headers() {
@@ -584,5 +906,53 @@ mod tests {
             output_filename("Angebot Außenputz Prüffläche.pdf"),
             "Angebot Aussenputz Pruefflaeche.x83"
         );
+    }
+
+    #[test]
+    fn database_migration_adds_consent_columns_to_existing_jobs() {
+        let directory = tempdir().unwrap();
+        let db_path = directory.path().join("gaeb-web.sqlite3");
+        let connection = Connection::open(&db_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE jobs (
+                   id TEXT PRIMARY KEY,
+                   token TEXT NOT NULL,
+                   email TEXT NOT NULL,
+                   contact_name TEXT NOT NULL,
+                   company TEXT NOT NULL,
+                   phone TEXT NOT NULL,
+                   filename TEXT NOT NULL,
+                   status TEXT NOT NULL,
+                   error TEXT,
+                   created_at TEXT NOT NULL,
+                   expires_at TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let state = Arc::new(AppState {
+            data_dir: directory.path().to_owned(),
+            db_path: db_path.clone(),
+            daily_limit: 2,
+            max_upload_bytes: 2 * 1024 * 1024,
+            retention_hours: 24,
+            diagnostic_retention_days: 30,
+            smtp: None,
+        });
+        init_database(&state).unwrap();
+
+        let connection = Connection::open(db_path).unwrap();
+        let mut statement = connection.prepare("PRAGMA table_info(jobs)").unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(columns.contains(&"email_fallback_consent".to_owned()));
+        assert!(columns.contains(&"feature_updates_consent".to_owned()));
+        assert!(columns.contains(&"email_fallback_consent_at".to_owned()));
+        assert!(columns.contains(&"feature_updates_consent_at".to_owned()));
     }
 }

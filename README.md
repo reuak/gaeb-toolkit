@@ -85,6 +85,10 @@ Die erste Webversion bietet:
 - asynchrone PDF-zu-X83-Konvertierung
 - geschützten Download-Link
 - automatische Löschung nach 24 Stunden
+- optionaler, ausdrücklich prüfpflichtiger X83-Entwurf mit Original-PDF und
+  Fehlerprotokoll per SMTP
+- getrennte Einwilligungen für Diagnosespeicherung und Informationen über neue
+  Funktionen
 - SQLite für Aufträge und Tageslimits
 - HTTPS über Caddy
 
@@ -116,9 +120,18 @@ Wichtige Einstellungen:
 DAILY_LIMIT=2
 MAX_UPLOAD_BYTES=2097152
 RETENTION_HOURS=24
+DIAGNOSTIC_RETENTION_DAYS=30
+SMTP_HOST=mail.example.de
+SMTP_PORT=587
+SMTP_USERNAME=gaeb@example.de
+SMTP_PASSWORD=change-me
+SMTP_FROM=gaeb@example.de
 RUST_LOG=info
 ```
 
 Vor dem öffentlichen Betrieb müssen insbesondere Impressum und
-Datenschutzerklärung mit den tatsächlichen Betreiberangaben vervollständigt und
-rechtlich geprüft werden.
+Datenschutzerklärung die optionale Diagnosespeicherung, den SMTP-Versand, die
+Speicherdauer und die Einwilligung für Funktionsinformationen abdecken und
+rechtlich geprüft werden. Einwilligungen für Funktionsinformationen werden in
+`feature_subscriptions` bis zum Widerruf gespeichert; vor einem tatsächlichen
+Newsletterversand sollte ein Double-Opt-in-Verfahren ergänzt werden.

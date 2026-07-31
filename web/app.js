@@ -11,6 +11,10 @@ const jobMessage = document.querySelector("#job-message");
 const progressBar = document.querySelector("#progress-bar");
 const downloadButton = document.querySelector("#download-button");
 const newJobButton = document.querySelector("#new-job-button");
+const gaebReaderForm = document.querySelector("#gaeb-reader-form");
+const gaebInput = document.querySelector("#gaeb");
+const gaebFileTitle = document.querySelector("#gaeb-file-title");
+const gaebFileMeta = document.querySelector("#gaeb-file-meta");
 
 document.querySelector("#year").textContent = new Date().getFullYear();
 
@@ -90,6 +94,19 @@ async function pollJob(id, token) {
       newJobButton.hidden = false;
       return;
     }
+    if (data.status === "emailed_with_warnings") {
+      spinner.className = "spinner is-done";
+      jobKicker.textContent = "Prüfentwurf versendet";
+      jobTitle.textContent = "Bitte prüfen Sie Ihr E-Mail-Postfach.";
+      jobMessage.textContent =
+        data.error ||
+        "Original-PDF, X83-Entwurf und Fehlerprotokoll wurden per E-Mail versendet.";
+      progressBar.style.width = "100%";
+      downloadButton.hidden = true;
+      downloadButton.removeAttribute("href");
+      newJobButton.hidden = false;
+      return;
+    }
     if (data.status === "failed") {
       showJobError(data.error || "Das LV konnte nicht konvertiert werden.");
       return;
@@ -125,4 +142,52 @@ function showJobError(message) {
 
 newJobButton.addEventListener("click", () => {
   window.location.reload();
+});
+
+gaebInput.addEventListener("change", () => {
+  const file = gaebInput.files[0];
+  if (!file) return;
+  gaebFileTitle.textContent = file.name;
+  gaebFileMeta.textContent = `${(file.size / 1024 / 1024).toFixed(2)} MB`;
+});
+
+gaebReaderForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const file = gaebInput.files[0];
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) {
+    gaebFileMeta.textContent = "Die Datei ist größer als 2 MB.";
+    gaebFileMeta.style.color = "var(--error)";
+    return;
+  }
+
+  const submit = gaebReaderForm.querySelector("button[type=submit]");
+  submit.disabled = true;
+  gaebFileMeta.style.color = "";
+  gaebFileMeta.textContent = "PDF wird erstellt …";
+  try {
+    const response = await fetch("/api/gaeb-to-pdf", {
+      method: "POST",
+      body: new FormData(gaebReaderForm),
+    });
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.error || "GAEB-Datei konnte nicht gelesen werden.");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${file.name.replace(/\.[^.]+$/, "") || "leistungsverzeichnis"}.pdf`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    gaebFileMeta.textContent = "PDF wurde erstellt.";
+  } catch (error) {
+    gaebFileMeta.textContent = error.message;
+    gaebFileMeta.style.color = "var(--error)";
+  } finally {
+    submit.disabled = false;
+  }
 });

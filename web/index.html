@@ -81,6 +81,25 @@
               </span>
             </label>
 
+            <label class="consent consent-optional">
+              <input name="email_fallback_consent" type="checkbox" />
+              <span>
+                Falls kein sicherer Export möglich ist: Ich möchte das Original-PDF,
+                einen ausdrücklich prüfpflichtigen X83-Entwurf und das Fehlerprotokoll
+                per E-Mail erhalten. Dafür dürfen die Auftragsdaten bis zu 30 Tage
+                zur Diagnose gespeichert werden.
+              </span>
+            </label>
+
+            <label class="consent consent-optional">
+              <input name="feature_updates_consent" type="checkbox" />
+              <span>
+                Ich möchte freiwillig per E-Mail über neue Funktionen des
+                LV-Konverters informiert werden. Diese Einwilligung kann ich
+                jederzeit widerrufen.
+              </span>
+            </label>
+
             <button class="primary-button" type="submit">
               <span>PDF in X83 konvertieren</span>
               <span aria-hidden="true">→</span>
@@ -116,6 +135,40 @@
           <li><span>02</span><strong>Struktur prüfen</strong><p>OZ, Titel, Positionen und Mengen werden validiert.</p></li>
           <li><span>03</span><strong>X83 laden</strong><p>Die fertige Datei steht 24 Stunden geschützt bereit.</p></li>
         </ol>
+      </section>
+
+      <section class="gaeb-reader" aria-labelledby="gaeb-reader-title">
+        <div>
+          <p class="eyebrow">GAEB-Dateien öffnen</p>
+          <h2 id="gaeb-reader-title">Aus GAEB wird ein lesbares PDF.</h2>
+          <p>
+            Eingehende GAEB-DA-XML-Dateien hochladen und als übersichtliches
+            Leistungsverzeichnis mit OZ, Texten, Mengen und Preisen herunterladen.
+            Unterstützt werden X81 bis X86 im XML-Format.
+          </p>
+        </div>
+        <form id="gaeb-reader-form" enctype="multipart/form-data">
+          <label class="file-drop compact-file-drop">
+            <input
+              id="gaeb"
+              name="gaeb"
+              type="file"
+              accept=".x81,.x82,.x83,.x84,.x85,.x86,.xml"
+              required
+            />
+            <span class="file-icon">GAEB</span>
+            <span class="file-title" id="gaeb-file-title">GAEB-Datei auswählen</span>
+            <span class="file-meta" id="gaeb-file-meta">DA XML, maximal 2 MB</span>
+          </label>
+          <button class="primary-button" type="submit">
+            <span>GAEB als PDF herunterladen</span>
+            <span aria-hidden="true">→</span>
+          </button>
+          <p class="form-note">
+            Die Datei wird nur für die unmittelbare PDF-Erzeugung verarbeitet und
+            nicht als Auftrag gespeichert.
+          </p>
+        </form>
       </section>
 
       <section class="paid-preview">
