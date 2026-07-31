@@ -15,6 +15,7 @@ const gaebReaderForm = document.querySelector("#gaeb-reader-form");
 const gaebInput = document.querySelector("#gaeb");
 const gaebFileTitle = document.querySelector("#gaeb-file-title");
 const gaebFileMeta = document.querySelector("#gaeb-file-meta");
+let pdfUploadLimit = 2 * 1024 * 1024;
 
 document.querySelector("#year").textContent = new Date().getFullYear();
 
@@ -50,6 +51,16 @@ async function initializeBilling() {
   const forms = document.querySelectorAll(".checkout-form");
   if (!forms.length) return;
   try {
+    const statusResponse = await fetch("/api/billing/status");
+    const status = await statusResponse.json();
+    if (status.signed_in) {
+      pdfUploadLimit = status.max_upload_bytes;
+      fileMeta.textContent = `Maximal ${(pdfUploadLimit / 1024 / 1024).toFixed(0)} MB`;
+      const label = status.plan === "pro"
+        ? "Pro ist aktiv"
+        : `${status.single_credits} Einzelkonvertierung${status.single_credits === 1 ? "" : "en"} verfügbar`;
+      document.querySelector("#preise .eyebrow").textContent = label;
+    }
     const response = await fetch("/api/billing/config");
     const config = await response.json();
     for (const form of forms) {
@@ -127,8 +138,8 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const file = fileInput.files[0];
   if (!file) return;
-  if (file.size > 2 * 1024 * 1024) {
-    showError("Die Datei ist größer als 2 MB.");
+  if (file.size > pdfUploadLimit) {
+    showError(`Die Datei ist größer als ${(pdfUploadLimit / 1024 / 1024).toFixed(0)} MB.`);
     return;
   }
 

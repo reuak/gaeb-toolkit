@@ -17,8 +17,8 @@ RUN useradd --system --uid 10001 --create-home gaeb \
 USER gaeb
 ENV BIND=0.0.0.0:8080 \
     DATA_DIR=/data \
-    DAILY_LIMIT=2 \
     MAX_UPLOAD_BYTES=2097152 \
+    PAID_MAX_UPLOAD_BYTES=26214400 \
     RETENTION_HOURS=24 \
     RUST_LOG=info
 EXPOSE 8080

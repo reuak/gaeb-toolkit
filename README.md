@@ -81,7 +81,7 @@ Die erste Webversion bietet:
 
 - PDF-Upload bis 2 MB
 - Kontaktdaten und Einwilligung
-- zwei kostenlose Konvertierungen pro E-Mail und Tag
+- drei kostenlose Konvertierungen pro E-Mail und Monat, jeweils bis 50 Positionen
 - asynchrone PDF-zu-X83-Konvertierung
 - direkte GAEB-DA-XML-X81-bis-X86-zu-PDF-Lesefassung ohne Auftragsspeicherung
 - geschützten Download-Link
@@ -118,8 +118,8 @@ liegen im Docker-Volume `gaeb-data`.
 Wichtige Einstellungen:
 
 ```dotenv
-DAILY_LIMIT=2
 MAX_UPLOAD_BYTES=2097152
+PAID_MAX_UPLOAD_BYTES=26214400
 RETENTION_HOURS=24
 DIAGNOSTIC_RETENTION_DAYS=30
 SMTP_HOST=mail.example.de
@@ -158,9 +158,12 @@ https://gaeb.example.de/api/stripe/webhook
 
 Sein Signaturgeheimnis `whsec_...` gehört ebenfalls nur in die `.env`. Der
 Dienst akzeptiert Webhooks höchstens fünf Minuten nach dem Stripe-Zeitstempel
-und speichert jede Event-ID nur einmal. Zunächst werden Ereignisse als
-revisionsfähige Grundlage protokolliert; Kontingente werden erst im nächsten
-Schritt nach bestätigten Checkout- und Rechnungsereignissen freigeschaltet.
+und verarbeitet jede Event-ID nur einmal. Ein bestätigter Einzelkauf erzeugt
+genau einen Credit, ein bestätigtes Pro-Abo den Pro-Zugang. Der Käufer erhält
+per SMTP einen 24 Stunden gültigen, einmalig verwendbaren Zugangslink. Die
+daraus erzeugte Browser-Sitzung ist 30 Tage gültig; erst sie erlaubt Uploads bis
+25 MB. Bei einem technischen Konvertierungsfehler wird ein reservierter
+Einzel-Credit automatisch zurückgebucht.
 
 Die Tracking-Einstellungen sind optional. Ohne Wert wird der jeweilige Dienst
 weder angezeigt noch geladen. `GOOGLE_TAG_MANAGER_ID` erwartet eine Container-ID

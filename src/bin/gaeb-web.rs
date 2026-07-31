@@ -12,7 +12,7 @@ use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -29,7 +29,7 @@ use lettre::{
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tokio::{fs, net::TcpListener, sync::RwLock, task};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::{services::ServeDir, trace::TraceLayer};
@@ -38,6 +38,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 const DEFAULT_MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
+const DEFAULT_PAID_MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 const IMPRINT_URL: &str = "https://www.hawkvision.de/impressum/";
 const IMPRINT_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
@@ -45,8 +46,8 @@ const IMPRINT_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 struct AppState {
     data_dir: PathBuf,
     db_path: PathBuf,
-    daily_limit: u32,
     max_upload_bytes: usize,
+    paid_max_upload_bytes: usize,
     retention_hours: i64,
     diagnostic_retention_days: i64,
     smtp: Option<SmtpConfig>,
@@ -122,6 +123,14 @@ struct BillingConfigResponse {
     pro_net_cents: u32,
 }
 
+#[derive(Serialize)]
+struct BillingStatusResponse {
+    signed_in: bool,
+    plan: &'static str,
+    single_credits: i64,
+    max_upload_bytes: usize,
+}
+
 #[derive(Deserialize)]
 struct CheckoutRequest {
     offer: String,
@@ -164,6 +173,16 @@ struct JobRecord {
     email: String,
     contact_name: String,
     email_fallback_consent: bool,
+    billing_tier: String,
+}
+
+struct BillingAccess {
+    email: String,
+}
+
+struct PurchaseNotice {
+    email: String,
+    offer: String,
 }
 
 #[tokio::main]
@@ -179,8 +198,8 @@ async fn main() -> Result<()> {
     let state = Arc::new(AppState {
         db_path: data_dir.join("gaeb-web.sqlite3"),
         data_dir,
-        daily_limit: env_u32("DAILY_LIMIT", 2),
         max_upload_bytes: env_usize("MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES),
+        paid_max_upload_bytes: env_usize("PAID_MAX_UPLOAD_BYTES", DEFAULT_PAID_MAX_UPLOAD_BYTES),
         retention_hours: env_i64("RETENTION_HOURS", 24),
         diagnostic_retention_days: env_i64("DIAGNOSTIC_RETENTION_DAYS", 30),
         smtp: smtp_config(),
@@ -193,6 +212,11 @@ async fn main() -> Result<()> {
         stripe: stripe_config(),
     });
     init_database(&state)?;
+    for notice in backfill_stripe_events(&state)? {
+        if let Err(error) = issue_billing_access_email(&state, &notice) {
+            error!(%error, email = %notice.email, "billing access email could not be sent");
+        }
+    }
 
     let cleanup_state = state.clone();
     tokio::spawn(async move {
@@ -211,8 +235,10 @@ async fn main() -> Result<()> {
         .route("/api/legal/imprint", get(imprint))
         .route("/api/public-config", get(public_config))
         .route("/api/billing/config", get(billing_config))
+        .route("/api/billing/status", get(billing_status))
         .route("/api/billing/checkout", post(create_checkout))
         .route("/api/stripe/webhook", post(stripe_webhook))
+        .route("/billing/access/{token}", get(activate_billing_access))
         .route("/api/jobs/{id}", get(job_status))
         .route("/download/{id}/{token}", get(download))
         .fallback_service(ServeDir::new("web").append_index_html_on_directories(true))
@@ -232,7 +258,9 @@ async fn main() -> Result<()> {
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
         ))
-        .layer(DefaultBodyLimit::max(state.max_upload_bytes + 256 * 1024))
+        .layer(DefaultBodyLimit::max(
+            state.paid_max_upload_bytes + 256 * 1024,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -258,6 +286,38 @@ async fn billing_config(State(state): State<Arc<AppState>>) -> Json<BillingConfi
         single_net_cents: 990,
         pro_net_cents: 1900,
     })
+}
+
+async fn billing_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<BillingStatusResponse>, ApiError> {
+    let Some(access) =
+        billing_access_from_headers(&state, &headers).map_err(|_| ApiError::internal())?
+    else {
+        return Ok(Json(BillingStatusResponse {
+            signed_in: false,
+            plan: "free",
+            single_credits: 0,
+            max_upload_bytes: state.max_upload_bytes,
+        }));
+    };
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let (pro_active, single_credits): (bool, i64) = connection
+        .query_row(
+            "SELECT pro_active, single_credits FROM billing_accounts WHERE email = ?1",
+            [&access.email],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| ApiError::internal())?
+        .unwrap_or((false, 0));
+    Ok(Json(BillingStatusResponse {
+        signed_in: true,
+        plan: if pro_active { "pro" } else { "single" },
+        single_credits,
+        max_upload_bytes: state.paid_max_upload_bytes,
+    }))
 }
 
 async fn create_checkout(
@@ -364,8 +424,8 @@ async fn stripe_webhook(
     let event_type = event_type.to_owned();
     let stored_event_id = event_id.clone();
     let stored_event_type = event_type.clone();
-    task::spawn_blocking(move || {
-        record_stripe_event(&db_path, &stored_event_id, &stored_event_type, &payload)
+    let notice = task::spawn_blocking(move || {
+        record_and_apply_stripe_event(&db_path, &stored_event_id, &stored_event_type, &payload)
     })
     .await
     .map_err(|_| ApiError::internal())?
@@ -373,8 +433,42 @@ async fn stripe_webhook(
         error!(%error, "stripe event could not be recorded");
         ApiError::internal()
     })?;
-    info!(%event_id, %event_type, "stripe event recorded");
+    if let Some(notice) = notice {
+        let mail_state = state.clone();
+        task::spawn_blocking(move || {
+            if let Err(error) = issue_billing_access_email(&mail_state, &notice) {
+                error!(%error, email = %notice.email, "billing access email could not be sent");
+            }
+        });
+    }
+    info!(%event_id, %event_type, "stripe event recorded and applied");
     Ok(StatusCode::OK)
+}
+
+async fn activate_billing_access(
+    State(state): State<Arc<AppState>>,
+    AxumPath(token): AxumPath<String>,
+) -> Result<Response, ApiError> {
+    let raw_session = Uuid::new_v4().simple().to_string();
+    let token_hash = hash_token(&token);
+    let session_hash = hash_token(&raw_session);
+    let db_path = state.db_path.clone();
+    task::spawn_blocking(move || activate_access_token(&db_path, &token_hash, &session_hash))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(|error| {
+            error!(%error, "billing access token could not be activated");
+            ApiError::bad_request("Der Zugangslink ist ungültig oder abgelaufen.")
+        })?;
+    let cookie = format!(
+        "gaeb_session={raw_session}; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=Lax"
+    );
+    let mut response = Redirect::to("/?billing=ready#preise").into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&cookie).map_err(|_| ApiError::internal())?,
+    );
+    Ok(response)
 }
 
 fn verify_stripe_signature(signature: &str, body: &[u8], secret: &str) -> Result<(), ApiError> {
@@ -418,13 +512,95 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, ()> {
         .collect()
 }
 
-fn record_stripe_event(db_path: &Path, id: &str, event_type: &str, payload: &str) -> Result<()> {
-    let connection = Connection::open(db_path)?;
-    connection.execute(
-        "INSERT OR IGNORE INTO stripe_events (id, event_type, payload, received_at) VALUES (?1, ?2, ?3, ?4)",
+fn record_and_apply_stripe_event(
+    db_path: &Path,
+    id: &str,
+    event_type: &str,
+    payload: &str,
+) -> Result<Option<PurchaseNotice>> {
+    let mut connection = Connection::open(db_path)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "INSERT OR IGNORE INTO stripe_events (id, event_type, payload, received_at)
+         VALUES (?1, ?2, ?3, ?4)",
         params![id, event_type, payload, Utc::now().to_rfc3339()],
     )?;
-    Ok(())
+    let processed: Option<String> = transaction
+        .query_row(
+            "SELECT processed_at FROM stripe_events WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    if processed.is_some() {
+        transaction.commit()?;
+        return Ok(None);
+    }
+
+    let event: serde_json::Value = serde_json::from_str(payload)?;
+    let object = &event["data"]["object"];
+    let notice = match event_type {
+        "checkout.session.completed" if object["payment_status"].as_str() == Some("paid") => {
+            let email = object["customer_details"]["email"]
+                .as_str()
+                .or_else(|| object["customer_email"].as_str())
+                .map(str::to_lowercase)
+                .context("Stripe-Checkout enthält keine E-Mail-Adresse")?;
+            let offer = object["metadata"]["offer"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let customer_id = object["customer"].as_str().unwrap_or_default();
+            let subscription_id = object["subscription"].as_str().unwrap_or_default();
+            transaction.execute(
+                "INSERT INTO billing_accounts
+                 (email, stripe_customer_id, stripe_subscription_id, pro_active, single_credits, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(email) DO UPDATE SET
+                   stripe_customer_id = CASE WHEN excluded.stripe_customer_id != '' THEN excluded.stripe_customer_id ELSE billing_accounts.stripe_customer_id END,
+                   stripe_subscription_id = CASE WHEN excluded.stripe_subscription_id != '' THEN excluded.stripe_subscription_id ELSE billing_accounts.stripe_subscription_id END,
+                   pro_active = MAX(billing_accounts.pro_active, excluded.pro_active),
+                   single_credits = billing_accounts.single_credits + excluded.single_credits,
+                   updated_at = excluded.updated_at",
+                params![
+                    email,
+                    customer_id,
+                    subscription_id,
+                    offer == "pro",
+                    i64::from(offer == "single"),
+                    Utc::now().to_rfc3339()
+                ],
+            )?;
+            matches!(offer.as_str(), "single" | "pro").then_some(PurchaseNotice { email, offer })
+        }
+        "invoice.paid" => {
+            if let Some(customer_id) = object["customer"].as_str() {
+                transaction.execute(
+                    "UPDATE billing_accounts SET pro_active = 1, updated_at = ?1 WHERE stripe_customer_id = ?2",
+                    params![Utc::now().to_rfc3339(), customer_id],
+                )?;
+            }
+            None
+        }
+        "invoice.payment_failed" | "customer.subscription.deleted" => {
+            if let Some(customer_id) = object["customer"].as_str() {
+                transaction.execute(
+                    "UPDATE billing_accounts SET pro_active = 0, updated_at = ?1 WHERE stripe_customer_id = ?2",
+                    params![Utc::now().to_rfc3339(), customer_id],
+                )?;
+            }
+            None
+        }
+        _ => None,
+    };
+    transaction.execute(
+        "UPDATE stripe_events SET processed_at = ?1 WHERE id = ?2",
+        params![Utc::now().to_rfc3339(), id],
+    )?;
+    transaction.commit()?;
+    Ok(notice)
 }
 
 async fn imprint(State(state): State<Arc<AppState>>) -> Result<Json<ImprintResponse>, ApiError> {
@@ -598,6 +774,7 @@ async fn gaeb_to_pdf(
 
 async fn create_job(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut form = UploadForm::default();
@@ -639,7 +816,9 @@ async fn create_job(
         }
     }
 
-    validate_form(&form, &state)?;
+    let access = billing_access_from_headers(&state, &headers).map_err(|_| ApiError::internal())?;
+    let has_paid_access = access.is_some();
+    validate_form(&form, &state, access.as_ref())?;
     let id = Uuid::new_v4().simple().to_string();
     let token = Uuid::new_v4().simple().to_string();
     let job_dir = state.data_dir.join("jobs").join(&id);
@@ -663,6 +842,7 @@ async fn create_job(
             &db_token,
             &db_form,
             &expires_at.to_rfc3339(),
+            access.as_ref(),
         )
     })
     .await
@@ -670,13 +850,12 @@ async fn create_job(
     .map_err(|_| ApiError::internal())?;
     if !reserved {
         let _ = fs::remove_dir_all(&job_dir).await;
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "Das kostenlose Tageslimit von {} Konvertierungen ist erreicht.",
-                state.daily_limit
-            ),
-        ));
+        let message = if has_paid_access {
+            "Kein aktives Pro-Abo oder Einzel-Credit verfügbar.".to_owned()
+        } else {
+            "Das kostenlose Monatslimit von 3 Dokumenten ist erreicht.".to_owned()
+        };
+        return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS, message));
     }
 
     let worker_state = state.clone();
@@ -777,6 +956,14 @@ async fn process_job(state: Arc<AppState>, id: String) -> Result<()> {
     let smtp = state.smtp.clone();
     let emailed_with_warnings = task::spawn_blocking(move || -> Result<bool> {
         let boq = parse_pdf(&processing_input)?;
+        if record.billing_tier == "free" {
+            let positions = count_positions(&boq.roots);
+            if positions > 50 {
+                anyhow::bail!(
+                    "Die kostenlose Version unterstützt maximal 50 Positionen; erkannt wurden {positions}."
+                );
+            }
+        }
         match write_x83(&boq, &processing_output, false) {
             Ok(()) => {
                 inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
@@ -819,7 +1006,11 @@ async fn process_job(state: Arc<AppState>, id: String) -> Result<()> {
     Ok(())
 }
 
-fn validate_form(form: &UploadForm, state: &AppState) -> Result<(), ApiError> {
+fn validate_form(
+    form: &UploadForm,
+    state: &AppState,
+    access: Option<&BillingAccess>,
+) -> Result<(), ApiError> {
     if form.contact_name.chars().count() < 2 {
         return Err(ApiError::bad_request("Bitte einen Kontaktnamen angeben."));
     }
@@ -836,12 +1027,25 @@ fn validate_form(form: &UploadForm, state: &AppState) -> Result<(), ApiError> {
     if form.pdf.is_empty() {
         return Err(ApiError::bad_request("Bitte eine PDF-Datei auswählen."));
     }
-    if form.pdf.len() > state.max_upload_bytes {
+    if let Some(access) = access {
+        if access.email != form.email {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "Bitte die beim Kauf verwendete E-Mail-Adresse verwenden.",
+            ));
+        }
+    }
+    let allowed_bytes = if access.is_some() {
+        state.paid_max_upload_bytes
+    } else {
+        state.max_upload_bytes
+    };
+    if form.pdf.len() > allowed_bytes {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
-                "Die kostenlose Version akzeptiert maximal {} MB.",
-                state.max_upload_bytes / 1024 / 1024
+                "Diese Zugangsart akzeptiert maximal {} MB.",
+                allowed_bytes / 1024 / 1024
             ),
         ));
     }
@@ -884,7 +1088,28 @@ fn init_database(state: &AppState) -> Result<()> {
            id TEXT PRIMARY KEY,
            event_type TEXT NOT NULL,
            payload TEXT NOT NULL,
-           received_at TEXT NOT NULL
+           received_at TEXT NOT NULL,
+           processed_at TEXT
+         );
+         CREATE TABLE IF NOT EXISTS billing_accounts (
+           email TEXT PRIMARY KEY,
+           stripe_customer_id TEXT NOT NULL DEFAULT '',
+           stripe_subscription_id TEXT NOT NULL DEFAULT '',
+           pro_active INTEGER NOT NULL DEFAULT 0,
+           single_credits INTEGER NOT NULL DEFAULT 0,
+           updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS billing_access_tokens (
+           token_hash TEXT PRIMARY KEY,
+           email TEXT NOT NULL,
+           expires_at TEXT NOT NULL,
+           created_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS billing_sessions (
+           session_hash TEXT PRIMARY KEY,
+           email TEXT NOT NULL,
+           expires_at TEXT NOT NULL,
+           created_at TEXT NOT NULL
          );",
     )?;
     ensure_job_column(
@@ -899,6 +1124,8 @@ fn init_database(state: &AppState) -> Result<()> {
     )?;
     ensure_job_column(&connection, "email_fallback_consent_at", "TEXT")?;
     ensure_job_column(&connection, "feature_updates_consent_at", "TEXT")?;
+    ensure_job_column(&connection, "billing_tier", "TEXT NOT NULL DEFAULT 'free'")?;
+    ensure_table_column(&connection, "stripe_events", "processed_at", "TEXT")?;
     connection.execute(
         "UPDATE jobs
          SET status = 'failed',
@@ -906,6 +1133,25 @@ fn init_database(state: &AppState) -> Result<()> {
          WHERE status IN ('queued', 'processing')",
         [],
     )?;
+    Ok(())
+}
+
+fn ensure_table_column(
+    connection: &Connection,
+    table: &str,
+    name: &str,
+    definition: &str,
+) -> Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == name) {
+        connection.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {name} {definition}"),
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -929,26 +1175,50 @@ fn reserve_job(
     token: &str,
     form: &UploadForm,
     expires_at: &str,
+    access: Option<&BillingAccess>,
 ) -> Result<bool> {
     let mut connection = Connection::open(&state.db_path)?;
     connection.busy_timeout(Duration::from_secs(5))?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let used_today: u32 = transaction.query_row(
-        "SELECT COUNT(*) FROM jobs
-         WHERE email = ?1 AND date(created_at) = date('now')",
-        [&form.email],
-        |row| row.get(0),
-    )?;
-    if used_today >= state.daily_limit {
-        return Ok(false);
-    }
+    let billing_tier = if let Some(access) = access {
+        let account: Option<(bool, i64)> = transaction
+            .query_row(
+                "SELECT pro_active, single_credits FROM billing_accounts WHERE email = ?1",
+                [&access.email],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match account {
+            Some((true, _)) => "pro",
+            Some((false, credits)) if credits > 0 => {
+                transaction.execute(
+                    "UPDATE billing_accounts SET single_credits = single_credits - 1, updated_at = ?1 WHERE email = ?2 AND single_credits > 0",
+                    params![Utc::now().to_rfc3339(), access.email],
+                )?;
+                "single"
+            }
+            _ => return Ok(false),
+        }
+    } else {
+        let used_this_month: u32 = transaction.query_row(
+            "SELECT COUNT(*) FROM jobs
+             WHERE email = ?1 AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')
+               AND billing_tier = 'free'",
+            [&form.email],
+            |row| row.get(0),
+        )?;
+        if used_this_month >= 3 {
+            return Ok(false);
+        }
+        "free"
+    };
     let now = Utc::now().to_rfc3339();
     transaction.execute(
         "INSERT INTO jobs
          (id, token, email, contact_name, company, phone, filename, status,
           email_fallback_consent, feature_updates_consent,
-          email_fallback_consent_at, feature_updates_consent_at, created_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13)",
+          email_fallback_consent_at, feature_updates_consent_at, created_at, expires_at, billing_tier)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             id,
             token,
@@ -963,6 +1233,7 @@ fn reserve_job(
             form.feature_updates_consent.then_some(now.as_str()),
             now,
             expires_at,
+            billing_tier,
         ],
     )?;
     if form.feature_updates_consent {
@@ -985,7 +1256,7 @@ fn load_job(state: &AppState, id: &str, token: &str) -> Result<Option<JobRecord>
     connection
         .query_row(
             "SELECT id, token, filename, status, error, expires_at,
-                    email, contact_name, email_fallback_consent
+                    email, contact_name, email_fallback_consent, billing_tier
              FROM jobs
              WHERE id = ?1 AND token = ?2 AND expires_at > ?3",
             params![id, token, Utc::now().to_rfc3339()],
@@ -1000,6 +1271,7 @@ fn load_job(state: &AppState, id: &str, token: &str) -> Result<Option<JobRecord>
                     email: row.get(6)?,
                     contact_name: row.get(7)?,
                     email_fallback_consent: row.get(8)?,
+                    billing_tier: row.get(9)?,
                 })
             },
         )
@@ -1012,7 +1284,7 @@ fn load_job_for_worker(state: &AppState, id: &str) -> Result<JobRecord> {
     connection
         .query_row(
             "SELECT id, token, filename, status, error, expires_at,
-                    email, contact_name, email_fallback_consent
+                    email, contact_name, email_fallback_consent, billing_tier
              FROM jobs WHERE id = ?1",
             [id],
             |row| {
@@ -1026,6 +1298,7 @@ fn load_job_for_worker(state: &AppState, id: &str) -> Result<JobRecord> {
                     email: row.get(6)?,
                     contact_name: row.get(7)?,
                     email_fallback_consent: row.get(8)?,
+                    billing_tier: row.get(9)?,
                 })
             },
         )
@@ -1056,14 +1329,36 @@ fn set_job_emailed_with_warnings(state: &AppState, id: &str, retention_days: i64
 }
 
 fn set_job_failed(state: &AppState, id: &str) -> Result<()> {
-    let connection = Connection::open(&state.db_path)?;
-    connection.execute(
+    let mut connection = Connection::open(&state.db_path)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let refundable_email: Option<String> = transaction
+        .query_row(
+            "SELECT email FROM jobs WHERE id = ?1 AND billing_tier = 'single' AND status != 'failed'",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    transaction.execute(
         "UPDATE jobs SET status = 'failed',
          error = 'Das LV konnte nicht sicher konvertiert werden. Bitte prüfen Sie das PDF.'
          WHERE id = ?1",
         [id],
     )?;
+    if let Some(email) = refundable_email {
+        transaction.execute(
+            "UPDATE billing_accounts SET single_credits = single_credits + 1, updated_at = ?1 WHERE email = ?2",
+            params![Utc::now().to_rfc3339(), email],
+        )?;
+    }
+    transaction.commit()?;
     Ok(())
+}
+
+fn count_positions(nodes: &[gaeb_toolkit::model::Node]) -> usize {
+    nodes
+        .iter()
+        .map(|node| node.positions.len() + count_positions(&node.children))
+        .sum()
 }
 
 fn send_fallback_email(
@@ -1126,6 +1421,148 @@ fn send_fallback_email(
     }
     builder.build().send(&message)?;
     Ok(())
+}
+
+fn backfill_stripe_events(state: &AppState) -> Result<Vec<PurchaseNotice>> {
+    let connection = Connection::open(&state.db_path)?;
+    let events = {
+        let mut statement = connection.prepare(
+            "SELECT id, event_type, payload FROM stripe_events WHERE processed_at IS NULL ORDER BY received_at",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    drop(connection);
+    let mut notices = Vec::new();
+    for (id, event_type, payload) in events {
+        if let Some(notice) =
+            record_and_apply_stripe_event(&state.db_path, &id, &event_type, &payload)?
+        {
+            notices.push(notice);
+        }
+    }
+    Ok(notices)
+}
+
+fn issue_billing_access_email(state: &AppState, notice: &PurchaseNotice) -> Result<()> {
+    let smtp = state
+        .smtp
+        .as_ref()
+        .context("SMTP ist für den Käufer-Zugangslink nicht konfiguriert")?;
+    let stripe = state
+        .stripe
+        .as_ref()
+        .context("PUBLIC_BASE_URL ist nicht konfiguriert")?;
+    let raw_token = Uuid::new_v4().simple().to_string();
+    let token_hash = hash_token(&raw_token);
+    let expires_at = (Utc::now() + ChronoDuration::hours(24)).to_rfc3339();
+    let connection = Connection::open(&state.db_path)?;
+    connection.execute(
+        "INSERT INTO billing_access_tokens (token_hash, email, expires_at, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            token_hash,
+            notice.email,
+            expires_at,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    let link = format!("{}/billing/access/{}", stripe.public_base_url, raw_token);
+    let product = if notice.offer == "pro" {
+        "GAEB Pro"
+    } else {
+        "eine Einzelkonvertierung"
+    };
+    let body = format!(
+        "Guten Tag,\n\nIhre Zahlung für {product} wurde bestätigt.\n\n\
+         Öffnen Sie innerhalb von 24 Stunden diesen persönlichen Zugangslink:\n{link}\n\n\
+         Anschließend ist Ihr gekauftes Kontingent in diesem Browser freigeschaltet.\n\n\
+         Falls Sie den Kauf nicht durchgeführt haben, ignorieren Sie diese Nachricht.\n"
+    );
+    let message = Message::builder()
+        .from(smtp.from.parse()?)
+        .to(notice.email.parse()?)
+        .subject("Ihr Zugang zum GAEB-Konverter")
+        .header(ContentType::TEXT_PLAIN)
+        .body(body)?;
+    let mut builder = SmtpTransport::relay(&smtp.host)?.port(smtp.port);
+    if !smtp.username.is_empty() {
+        builder = builder.credentials(Credentials::new(
+            smtp.username.clone(),
+            smtp.password.clone(),
+        ));
+    }
+    builder.build().send(&message)?;
+    Ok(())
+}
+
+fn activate_access_token(db_path: &Path, token_hash: &str, session_hash: &str) -> Result<()> {
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let email: String = transaction.query_row(
+        "SELECT email FROM billing_access_tokens WHERE token_hash = ?1 AND expires_at > ?2",
+        params![token_hash, Utc::now().to_rfc3339()],
+        |row| row.get(0),
+    )?;
+    transaction.execute(
+        "INSERT INTO billing_sessions (session_hash, email, expires_at, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            session_hash,
+            email,
+            (Utc::now() + ChronoDuration::days(30)).to_rfc3339(),
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    transaction.execute(
+        "DELETE FROM billing_access_tokens WHERE token_hash = ?1",
+        [token_hash],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn billing_access_from_headers(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<BillingAccess>> {
+    let Some(raw_session) = cookie_value(headers, "gaeb_session") else {
+        return Ok(None);
+    };
+    let connection = Connection::open(&state.db_path)?;
+    connection
+        .query_row(
+            "SELECT email FROM billing_sessions WHERE session_hash = ?1 AND expires_at > ?2",
+            params![hash_token(&raw_session), Utc::now().to_rfc3339()],
+            |row| Ok(BillingAccess { email: row.get(0)? }),
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .filter_map(|part| part.trim().split_once('='))
+        .find_map(|(key, value)| (key == name).then(|| value.to_owned()))
+}
+
+fn hash_token(value: &str) -> String {
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 async fn cleanup_expired_jobs(state: &AppState) -> Result<()> {
@@ -1193,13 +1630,6 @@ fn output_filename(input: &str) -> String {
         .and_then(|value| value.to_str())
         .unwrap_or("leistungsverzeichnis");
     format!("{}.x83", safe_filename(stem))
-}
-
-fn env_u32(name: &str, default: u32) -> u32 {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
@@ -1387,7 +1817,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        extract_imprint_sections, init_database, output_filename, verify_stripe_signature, AppState,
+        extract_imprint_sections, init_database, output_filename, record_and_apply_stripe_event,
+        verify_stripe_signature, AppState,
     };
 
     #[test]
@@ -1467,8 +1898,8 @@ mod tests {
         let state = Arc::new(AppState {
             data_dir: directory.path().to_owned(),
             db_path: db_path.clone(),
-            daily_limit: 2,
             max_upload_bytes: 2 * 1024 * 1024,
+            paid_max_upload_bytes: 25 * 1024 * 1024,
             retention_hours: 24,
             diagnostic_retention_days: 30,
             smtp: None,
@@ -1490,5 +1921,62 @@ mod tests {
         assert!(columns.contains(&"feature_updates_consent".to_owned()));
         assert!(columns.contains(&"email_fallback_consent_at".to_owned()));
         assert!(columns.contains(&"feature_updates_consent_at".to_owned()));
+    }
+
+    #[test]
+    fn paid_checkout_grants_exactly_one_credit_even_when_repeated() {
+        let directory = tempdir().unwrap();
+        let db_path = directory.path().join("gaeb-web.sqlite3");
+        let state = Arc::new(AppState {
+            data_dir: directory.path().to_owned(),
+            db_path: db_path.clone(),
+            max_upload_bytes: 2 * 1024 * 1024,
+            paid_max_upload_bytes: 25 * 1024 * 1024,
+            retention_hours: 24,
+            diagnostic_retention_days: 30,
+            smtp: None,
+            http_client: reqwest::Client::new(),
+            imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tracking: Default::default(),
+            stripe: None,
+        });
+        init_database(&state).unwrap();
+        let payload = r#"{
+          "id":"evt_paid_once",
+          "type":"checkout.session.completed",
+          "data":{"object":{
+            "payment_status":"paid",
+            "customer":"cus_test",
+            "customer_details":{"email":"BUYER@EXAMPLE.DE"},
+            "metadata":{"offer":"single"}
+          }}
+        }"#;
+
+        let first = record_and_apply_stripe_event(
+            &db_path,
+            "evt_paid_once",
+            "checkout.session.completed",
+            payload,
+        )
+        .unwrap();
+        let repeated = record_and_apply_stripe_event(
+            &db_path,
+            "evt_paid_once",
+            "checkout.session.completed",
+            payload,
+        )
+        .unwrap();
+        let connection = Connection::open(db_path).unwrap();
+        let credits: i64 = connection
+            .query_row(
+                "SELECT single_credits FROM billing_accounts WHERE email = 'buyer@example.de'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(first.unwrap().email, "buyer@example.de");
+        assert!(repeated.is_none());
+        assert_eq!(credits, 1);
     }
 }
