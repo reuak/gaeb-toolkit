@@ -4,6 +4,7 @@ use anyhow::{bail, Context};
 
 mod breakdown;
 pub mod export;
+pub mod gaeb_reader;
 pub mod inline_png;
 pub mod model;
 #[path = "parser_v2.rs"]
@@ -18,6 +19,7 @@ pub mod reference_cleanup;
 pub mod title_cleanup;
 pub mod x83;
 
+pub use gaeb_reader::{read_gaeb_xml, write_gaeb_pdf, GaebDocument, GaebItem, GaebRow};
 pub use inline_png::inject_pdf_pngs;
 pub use model::{BillOfQuantities, Node, Position};
 pub use parser::parse_text;

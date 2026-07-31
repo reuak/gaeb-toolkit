@@ -83,6 +83,7 @@ Die erste Webversion bietet:
 - Kontaktdaten und Einwilligung
 - zwei kostenlose Konvertierungen pro E-Mail und Tag
 - asynchrone PDF-zu-X83-Konvertierung
+- direkte GAEB-DA-XML-X81-bis-X86-zu-PDF-Lesefassung ohne Auftragsspeicherung
 - geschützten Download-Link
 - automatische Löschung nach 24 Stunden
 - optionaler, ausdrücklich prüfpflichtiger X83-Entwurf mit Original-PDF und

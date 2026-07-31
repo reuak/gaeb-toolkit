@@ -243,6 +243,22 @@ h1 {
 .secondary-button { margin-top: 10px; background: #edf0eb; color: var(--ink); }
 .form-note { margin: 10px 0 0; color: #78847f; text-align: center; font-size: 10px; }
 
+.gaeb-reader {
+  width: min(1180px, calc(100% - 40px));
+  margin: 0 auto 80px;
+  padding: 42px;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: #fffdf8;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.75fr);
+  gap: 55px;
+  align-items: center;
+}
+.gaeb-reader h2 { margin: 5px 0 15px; font-size: clamp(34px, 4vw, 55px); }
+.gaeb-reader p { color: var(--muted); line-height: 1.65; }
+.compact-file-drop { min-height: 150px; margin-bottom: 14px; }
+
 .job-panel { padding: 26px 0 4px; }
 .job-state { display: grid; grid-template-columns: 40px 1fr; gap: 14px; align-items: start; }
 .job-state h3 { margin: 0 0 7px; font-family: Georgia, serif; font-size: 26px; font-weight: 500; }
@@ -322,9 +338,10 @@ footer nav { display: flex; gap: 18px; }
   .trust-row { justify-content: center; }
   .converter-card { width: min(100%, 620px); margin: 0 auto; }
   .how-it-works { grid-template-columns: 1fr; gap: 35px; }
+  .gaeb-reader { grid-template-columns: 1fr; gap: 28px; }
 }
 @media (max-width: 580px) {
-  .site-header, .hero, .how-it-works, .paid-preview, footer { width: min(100% - 24px, 1180px); }
+  .site-header, .hero, .how-it-works, .gaeb-reader, .paid-preview, footer { width: min(100% - 24px, 1180px); }
   .header-note { display: none; }
   .hero { margin-bottom: 65px; }
   h1 { font-size: 47px; }
@@ -332,6 +349,7 @@ footer nav { display: flex; gap: 18px; }
   .converter-card { padding: 23px 17px; border-radius: 20px; }
   .field-grid { grid-template-columns: 1fr; }
   .how-it-works ol { grid-template-columns: 1fr; }
+  .gaeb-reader { padding: 28px 22px; }
   .paid-preview { padding: 28px 22px; align-items: flex-start; flex-direction: column; }
   footer { align-items: flex-start; gap: 15px; flex-direction: column; }
 }
