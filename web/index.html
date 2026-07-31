@@ -17,7 +17,7 @@
   <body>
     <header class="site-header">
       <a class="brand" href="/" aria-label="LV Konverter Startseite">
-        <span class="brand-mark"><img src="/assets/gaeb-konverter-icon.png?v=2" alt="" /></span>
+        <span class="brand-mark"><img src="/assets/gaeb-konverter-logo.png?v=3" alt="" /></span>
         <span>GAEB Konverter</span>
       </a>
       <div class="header-note">PDF ↔ GAEB DA XML 3.3</div>
@@ -35,7 +35,8 @@
           </p>
           <div class="trust-row" aria-label="Leistungsmerkmale">
             <span>Bis 2 MB kostenlos</span>
-            <span>2 Konvertierungen pro Tag</span>
+            <span>3 Dokumente pro Monat</span>
+            <span>Bis 50 Positionen</span>
             <span>Löschung nach 24 Stunden</span>
           </div>
         </div>
@@ -79,8 +80,9 @@
             <label class="consent">
               <input name="consent" type="checkbox" required />
               <span>
-                Ich stimme der Verarbeitung des PDFs zur Konvertierung und der
-                automatischen Löschung nach 24 Stunden zu. *
+                Ich habe die <a href="/datenschutz.html">Datenschutzerklärung</a>
+                zur Kenntnis genommen und beauftrage die Verarbeitung des PDFs zur
+                Konvertierung. Die Auftragsdaten werden regulär nach 24 Stunden gelöscht. *
               </span>
             </label>
 
@@ -174,16 +176,37 @@
         </form>
       </section>
 
-      <section class="paid-preview">
+      <section class="paid-preview" id="preise">
         <div>
-          <p class="eyebrow">Für größere Projekte</p>
-          <h2>Mehr Volumen, X84 und Stapelverarbeitung.</h2>
+          <p class="eyebrow">Für größere Leistungsverzeichnisse</p>
+          <h2>Einzeln konvertieren oder regelmäßig Pro nutzen.</h2>
           <p>
-            Der nächste Ausbau ergänzt Credits, größere Dateien, X84,
-            priorisierte Verarbeitung und Firmenkonten.
+            Der Einzelkauf eignet sich zum unverbindlichen Test. Ab dem dritten
+            bezahlten Dokument ist Pro günstiger.
           </p>
         </div>
-        <span class="coming-soon">In Vorbereitung</span>
+        <div class="pricing-grid">
+          <article class="price-card">
+            <p class="step-label">Einzelkauf</p>
+            <h3>9,90 € <small>netto</small></h3>
+            <p>Ein Dokument bis 25 MB, X83/X84, Fehlerprotokoll und sieben Tage Download.</p>
+            <form class="checkout-form" data-offer="single">
+              <label><span>E-Mail</span><input type="email" name="email" required autocomplete="email" /></label>
+              <button class="secondary-button checkout-button" type="submit">Einzeln kaufen</button>
+              <p class="checkout-note" aria-live="polite"></p>
+            </form>
+          </article>
+          <article class="price-card featured">
+            <p class="step-label">Pro-Abo</p>
+            <h3>19 € <small>netto / Monat</small></h3>
+            <p>100 Dokumente monatlich, bis 25 MB je Datei und insgesamt 2 GB Speicher.</p>
+            <form class="checkout-form" data-offer="pro">
+              <label><span>E-Mail</span><input type="email" name="email" required autocomplete="email" /></label>
+              <button class="primary-button checkout-button" type="submit">Pro starten</button>
+              <p class="checkout-note" aria-live="polite"></p>
+            </form>
+          </article>
+        </div>
       </section>
 
       <section class="legal-panel" id="impressum" aria-labelledby="legal-title">
@@ -192,9 +215,6 @@
             <p class="eyebrow">Rechtliche Angaben</p>
             <h2 id="legal-title">Betreiberangaben</h2>
           </div>
-          <a class="logo-download" href="/assets/gaeb-konverter-logo.png?v=2" download="gaeb-konverter-logo.png">
-            Logo als PNG herunterladen
-          </a>
         </div>
         <div id="imprint-content" class="imprint-grid" aria-live="polite">
           <p>Betreiberangaben werden geladen …</p>

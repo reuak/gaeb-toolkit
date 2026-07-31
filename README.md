@@ -131,9 +131,36 @@ GOOGLE_TAG_MANAGER_ID=GTM-TF86FD6Z
 GOOGLE_ANALYTICS_ID=
 META_PIXEL_ID=
 KLICKTIPP_PIXEL_URL=
-COOKIE_CONSENT_VERSION=1
+COOKIE_CONSENT_VERSION=2
+PUBLIC_BASE_URL=https://gaeb.example.de
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+STRIPE_SINGLE_PRICE_ID=
+STRIPE_PRO_PRICE_ID=
 RUST_LOG=info
 ```
+
+### Stripe im Testmodus
+
+Im Stripe-Dashboard werden zwei Preise angelegt: `9,90 EUR` als Einmalzahlung
+und `19,00 EUR` monatlich als Abonnement. Die zugehörigen `price_...`-IDs und
+der Testschlüssel `sk_test_...` werden ausschließlich in der Server-`.env`
+eingetragen. Der Webhook zeigt auf:
+
+Beide Preise werden als Nettopreise mit exklusivem Steuerverhalten angelegt.
+Vor einem Live-Test müssen in Stripe Tax die Unternehmensanschrift und die
+erforderlichen Steuerregistrierungen konfiguriert sein; Checkout ermittelt die
+Steuer anhand von Rechnungsanschrift und gegebenenfalls USt-IdNr.
+
+```text
+https://gaeb.example.de/api/stripe/webhook
+```
+
+Sein Signaturgeheimnis `whsec_...` gehört ebenfalls nur in die `.env`. Der
+Dienst akzeptiert Webhooks höchstens fünf Minuten nach dem Stripe-Zeitstempel
+und speichert jede Event-ID nur einmal. Zunächst werden Ereignisse als
+revisionsfähige Grundlage protokolliert; Kontingente werden erst im nächsten
+Schritt nach bestätigten Checkout- und Rechnungsereignissen freigeschaltet.
 
 Die Tracking-Einstellungen sind optional. Ohne Wert wird der jeweilige Dienst
 weder angezeigt noch geladen. `GOOGLE_TAG_MANAGER_ID` erwartet eine Container-ID
@@ -146,6 +173,8 @@ Cookie-Banner. Wird dessen Text oder Zweck wesentlich geändert, kann
 Im Tag-Manager-Container müssen die einzelnen Tags zusätzlich mit den passenden
 Consent-Anforderungen konfiguriert werden. Eine direkte GA4-ID ist nicht nötig,
 wenn GA4 bereits vollständig über den Tag Manager verwaltet wird.
+Sind GTM- und GA4-ID gleichzeitig gesetzt, hat der Tag Manager Vorrang; die
+direkte GA4-Einbindung bleibt deaktiviert, um doppelte Seitenaufrufe zu vermeiden.
 
 Vor dem öffentlichen Betrieb müssen insbesondere Impressum und
 Datenschutzerklärung die optionale Diagnosespeicherung, den SMTP-Versand, die

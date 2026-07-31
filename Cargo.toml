@@ -12,6 +12,7 @@ axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
+hmac = "0.12"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls"] }
 printpdf = { version = "0.7", default-features = false }
@@ -23,6 +24,7 @@ scraper = "0.22"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "process", "sync", "time"] }
 tower-http = { version = "0.6", features = ["limit", "trace", "fs", "set-header"] }

@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -20,6 +20,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use gaeb_toolkit::{
     apply_provisional_flags, inject_pdf_pngs, parse_pdf, read_gaeb_xml, write_gaeb_pdf, write_x83,
 };
+use hmac::{Hmac, Mac};
 use lettre::{
     message::{header::ContentType, Attachment, MultiPart, SinglePart},
     transport::smtp::authentication::Credentials,
@@ -27,8 +28,10 @@ use lettre::{
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use scraper::{Html, Selector};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use tokio::{fs, net::TcpListener, sync::RwLock, task};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -50,6 +53,16 @@ struct AppState {
     http_client: reqwest::Client,
     imprint_cache: Arc<RwLock<Option<CachedImprint>>>,
     tracking: PublicTrackingConfig,
+    stripe: Option<StripeConfig>,
+}
+
+#[derive(Clone)]
+struct StripeConfig {
+    secret_key: String,
+    webhook_secret: String,
+    single_price_id: String,
+    pro_price_id: String,
+    public_base_url: String,
 }
 
 #[derive(Clone)]
@@ -100,6 +113,24 @@ struct JobStatusResponse {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Serialize)]
+struct BillingConfigResponse {
+    enabled: bool,
+    single_net_cents: u32,
+    pro_net_cents: u32,
+}
+
+#[derive(Deserialize)]
+struct CheckoutRequest {
+    offer: String,
+    email: String,
+}
+
+#[derive(Serialize)]
+struct CheckoutResponse {
+    url: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -159,6 +190,7 @@ async fn main() -> Result<()> {
             .build()?,
         imprint_cache: Arc::new(RwLock::new(None)),
         tracking: tracking_config(),
+        stripe: stripe_config(),
     });
     init_database(&state)?;
 
@@ -178,9 +210,28 @@ async fn main() -> Result<()> {
         .route("/api/gaeb-to-pdf", post(gaeb_to_pdf))
         .route("/api/legal/imprint", get(imprint))
         .route("/api/public-config", get(public_config))
+        .route("/api/billing/config", get(billing_config))
+        .route("/api/billing/checkout", post(create_checkout))
+        .route("/api/stripe/webhook", post(stripe_webhook))
         .route("/api/jobs/{id}", get(job_status))
         .route("/download/{id}/{token}", get(download))
         .fallback_service(ServeDir::new("web").append_index_html_on_directories(true))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
         .layer(DefaultBodyLimit::max(state.max_upload_bytes + 256 * 1024))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -199,6 +250,181 @@ async fn health() -> &'static str {
 
 async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicTrackingConfig> {
     Json(state.tracking.clone())
+}
+
+async fn billing_config(State(state): State<Arc<AppState>>) -> Json<BillingConfigResponse> {
+    Json(BillingConfigResponse {
+        enabled: state.stripe.is_some(),
+        single_net_cents: 990,
+        pro_net_cents: 1900,
+    })
+}
+
+async fn create_checkout(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CheckoutRequest>,
+) -> Result<Json<CheckoutResponse>, ApiError> {
+    let stripe = state
+        .stripe
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("Der Bezahlbereich ist noch nicht freigeschaltet."))?;
+    let email = request.email.trim().to_lowercase();
+    if !valid_email(&email) {
+        return Err(ApiError::bad_request(
+            "Bitte eine gültige E-Mail-Adresse angeben.",
+        ));
+    }
+    let (price_id, mode) = match request.offer.as_str() {
+        "single" => (&stripe.single_price_id, "payment"),
+        "pro" => (&stripe.pro_price_id, "subscription"),
+        _ => return Err(ApiError::bad_request("Unbekanntes Angebot.")),
+    };
+    let success_url = format!(
+        "{}/?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
+        stripe.public_base_url
+    );
+    let cancel_url = format!("{}/?checkout=cancelled#preise", stripe.public_base_url);
+    let mut checkout_fields = vec![
+        ("mode", mode),
+        ("line_items[0][price]", price_id.as_str()),
+        ("line_items[0][quantity]", "1"),
+        ("customer_email", email.as_str()),
+        ("success_url", success_url.as_str()),
+        ("cancel_url", cancel_url.as_str()),
+        ("billing_address_collection", "required"),
+        ("tax_id_collection[enabled]", "true"),
+        ("automatic_tax[enabled]", "true"),
+        ("metadata[offer]", request.offer.as_str()),
+    ];
+    if mode == "payment" {
+        checkout_fields.push(("customer_creation", "always"));
+    }
+    let response = state
+        .http_client
+        .post("https://api.stripe.com/v1/checkout/sessions")
+        .bearer_auth(&stripe.secret_key)
+        .form(&checkout_fields)
+        .send()
+        .await
+        .map_err(|error| {
+            error!(%error, "stripe checkout request failed");
+            ApiError::upstream("Stripe ist vorübergehend nicht erreichbar.")
+        })?;
+    let status = response.status();
+    let response_body = response.text().await.map_err(|error| {
+        error!(%error, "stripe checkout response could not be read");
+        ApiError::upstream("Stripe hat eine ungültige Antwort geliefert.")
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&response_body).map_err(|error| {
+        error!(%error, "stripe checkout response was not JSON");
+        ApiError::upstream("Stripe hat eine ungültige Antwort geliefert.")
+    })?;
+    if !status.is_success() {
+        error!(%status, response = %value, "stripe checkout rejected");
+        return Err(ApiError::upstream(
+            "Der Stripe-Checkout konnte nicht geöffnet werden.",
+        ));
+    }
+    let url = value
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ApiError::upstream("Stripe hat keine Checkout-Adresse geliefert."))?;
+    Ok(Json(CheckoutResponse {
+        url: url.to_owned(),
+    }))
+}
+
+async fn stripe_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let stripe = state
+        .stripe
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("Stripe ist nicht konfiguriert."))?;
+    let signature = headers
+        .get("stripe-signature")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::bad_request("Stripe-Signatur fehlt."))?;
+    verify_stripe_signature(signature, &body, &stripe.webhook_secret)?;
+    let event: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::bad_request("Ungültiges Stripe-Ereignis."))?;
+    let event_id = event
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("Stripe-Ereignis ohne ID."))?;
+    let event_type = event
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let payload = String::from_utf8_lossy(&body).into_owned();
+    let db_path = state.db_path.clone();
+    let event_id = event_id.to_owned();
+    let event_type = event_type.to_owned();
+    let stored_event_id = event_id.clone();
+    let stored_event_type = event_type.clone();
+    task::spawn_blocking(move || {
+        record_stripe_event(&db_path, &stored_event_id, &stored_event_type, &payload)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+    .map_err(|error| {
+        error!(%error, "stripe event could not be recorded");
+        ApiError::internal()
+    })?;
+    info!(%event_id, %event_type, "stripe event recorded");
+    Ok(StatusCode::OK)
+}
+
+fn verify_stripe_signature(signature: &str, body: &[u8], secret: &str) -> Result<(), ApiError> {
+    let mut timestamp = None;
+    let mut signatures = Vec::new();
+    for part in signature.split(',') {
+        if let Some(value) = part.strip_prefix("t=") {
+            timestamp = value.parse::<i64>().ok();
+        } else if let Some(value) = part.strip_prefix("v1=") {
+            signatures.push(value);
+        }
+    }
+    let timestamp = timestamp.ok_or_else(|| ApiError::bad_request("Ungültige Stripe-Signatur."))?;
+    if (Utc::now().timestamp() - timestamp).abs() > 300 {
+        return Err(ApiError::bad_request("Abgelaufene Stripe-Signatur."));
+    }
+    let signed = format!("{timestamp}.{}", String::from_utf8_lossy(body));
+    let valid = signatures.iter().any(|signature| {
+        let Ok(expected) = decode_hex(signature) else {
+            return false;
+        };
+        let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+            return false;
+        };
+        mac.update(signed.as_bytes());
+        mac.verify_slice(&expected).is_ok()
+    });
+    if !valid {
+        return Err(ApiError::bad_request("Stripe-Signatur nicht gültig."));
+    }
+    Ok(())
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, ()> {
+    if value.len() % 2 != 0 {
+        return Err(());
+    }
+    (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).map_err(|_| ()))
+        .collect()
+}
+
+fn record_stripe_event(db_path: &Path, id: &str, event_type: &str, payload: &str) -> Result<()> {
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "INSERT OR IGNORE INTO stripe_events (id, event_type, payload, received_at) VALUES (?1, ?2, ?3, ?4)",
+        params![id, event_type, payload, Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
 }
 
 async fn imprint(State(state): State<Arc<AppState>>) -> Result<Json<ImprintResponse>, ApiError> {
@@ -604,7 +830,7 @@ fn validate_form(form: &UploadForm, state: &AppState) -> Result<(), ApiError> {
     }
     if !form.consent {
         return Err(ApiError::bad_request(
-            "Die Zustimmung zur Verarbeitung ist erforderlich.",
+            "Bitte die Datenschutzerklärung bestätigen und die Konvertierung beauftragen.",
         ));
     }
     if form.pdf.is_empty() {
@@ -653,6 +879,12 @@ fn init_database(state: &AppState) -> Result<()> {
            contact_name TEXT NOT NULL,
            consent_at TEXT NOT NULL,
            source TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS stripe_events (
+           id TEXT PRIMARY KEY,
+           event_type TEXT NOT NULL,
+           payload TEXT NOT NULL,
+           received_at TEXT NOT NULL
          );",
     )?;
     ensure_job_column(
@@ -984,6 +1216,47 @@ fn env_i64(name: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
+fn valid_email(value: &str) -> bool {
+    value.len() <= 254
+        && value.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        })
+}
+
+fn stripe_config() -> Option<StripeConfig> {
+    let secret_key = required_env("STRIPE_SECRET_KEY")?;
+    let webhook_secret = required_env("STRIPE_WEBHOOK_SECRET")?;
+    let single_price_id = required_env("STRIPE_SINGLE_PRICE_ID")?;
+    let pro_price_id = required_env("STRIPE_PRO_PRICE_ID")?;
+    let public_base_url = required_env("PUBLIC_BASE_URL")?;
+    if !secret_key.starts_with("sk_")
+        || !webhook_secret.starts_with("whsec_")
+        || !single_price_id.starts_with("price_")
+        || !pro_price_id.starts_with("price_")
+        || !public_base_url.starts_with("https://")
+    {
+        error!("Stripe-Konfiguration ist unvollständig oder ungültig; Checkout bleibt deaktiviert");
+        return None;
+    }
+    Some(StripeConfig {
+        secret_key,
+        webhook_secret,
+        single_price_id,
+        pro_price_id,
+        public_base_url: public_base_url.trim_end_matches('/').to_owned(),
+    })
+}
+
+fn required_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
 fn smtp_config() -> Option<SmtpConfig> {
     let host = env::var("SMTP_HOST").ok()?.trim().to_owned();
     let from = env::var("SMTP_FROM").ok()?.trim().to_owned();
@@ -1085,6 +1358,10 @@ impl ApiError {
     fn upstream(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_GATEWAY, message)
     }
+
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -1103,10 +1380,15 @@ impl IntoResponse for ApiError {
 mod tests {
     use std::sync::Arc;
 
+    use chrono::Utc;
+    use hmac::{Hmac, Mac};
     use rusqlite::Connection;
+    use sha2::Sha256;
     use tempfile::tempdir;
 
-    use super::{extract_imprint_sections, init_database, output_filename, AppState};
+    use super::{
+        extract_imprint_sections, init_database, output_filename, verify_stripe_signature, AppState,
+    };
 
     #[test]
     fn imprint_extraction_omits_page_title_and_following_company_area() {
@@ -1136,6 +1418,26 @@ mod tests {
             output_filename("Angebot Außenputz Prüffläche.pdf"),
             "Angebot Aussenputz Pruefflaeche.x83"
         );
+    }
+
+    #[test]
+    fn stripe_signature_accepts_valid_payload_and_rejects_changes() {
+        let timestamp = Utc::now().timestamp();
+        let body = br#"{"id":"evt_test","type":"checkout.session.completed"}"#;
+        let secret = "whsec_test_secret";
+        let signed = format!("{timestamp}.{}", String::from_utf8_lossy(body));
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(signed.as_bytes());
+        let signature = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let header = format!("t={timestamp},v1={signature}");
+
+        assert!(verify_stripe_signature(&header, body, secret).is_ok());
+        assert!(verify_stripe_signature(&header, b"changed", secret).is_err());
     }
 
     #[test]
@@ -1173,6 +1475,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tracking: Default::default(),
+            stripe: None,
         });
         init_database(&state).unwrap();
 

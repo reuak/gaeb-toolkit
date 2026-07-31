@@ -52,9 +52,9 @@ button, a, .file-drop { touch-action: manipulation; }
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 39px;
-  height: 39px;
-  border-radius: 11px;
+  width: 150px;
+  height: 150px;
+  border-radius: 24px;
   overflow: hidden;
   background: transparent;
 }
@@ -258,15 +258,6 @@ h1 {
 }
 .legal-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
 .legal-heading h2 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 31px; font-weight: 500; }
-.logo-download {
-  padding: 11px 15px;
-  border: 1px solid rgba(16, 35, 29, 0.16);
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 750;
-  text-decoration: none;
-}
-.logo-download:hover { background: white; }
 .imprint-grid { margin-top: 30px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 44px; }
 .imprint-grid h3 { margin: 0 0 10px; font-size: 15px; }
 .imprint-grid p { margin: 4px 0; color: #52615c; font-size: 13px; line-height: 1.55; }
@@ -367,6 +358,33 @@ h1 {
   justify-content: space-between;
   align-items: center;
   gap: 30px;
+}
+
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 18px;
+  width: min(680px, 100%);
+}
+
+.price-card {
+  padding: 24px;
+  border: 1px solid rgba(12, 49, 41, 0.16);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.price-card.featured { border-color: var(--green); }
+.price-card h3 { margin: 6px 0 12px; font-size: 1.8rem; }
+.price-card h3 small { font: inherit; font-size: 0.78rem; color: var(--muted); }
+.checkout-form { display: grid; gap: 10px; margin-top: 18px; }
+.checkout-form label { display: grid; gap: 5px; }
+.checkout-form input { width: 100%; }
+.checkout-form .primary-button, .checkout-form .secondary-button { width: 100%; }
+.checkout-note { min-height: 1.4em; margin: 0; color: var(--muted); font-size: 0.82rem; }
+
+@media (max-width: 760px) {
+  .pricing-grid { grid-template-columns: 1fr; }
 }
 .paid-preview > div { max-width: 690px; }
 .paid-preview .eyebrow { color: var(--lime); }

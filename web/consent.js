@@ -14,11 +14,17 @@
   }
 
   const storageKey = `gaeb-consent:${config.consent_version || "1"}`;
+  const consentMaxAge = 180 * 24 * 60 * 60 * 1000;
   let loaded = { analytics: false, marketing: false };
 
   function readChoice() {
     try {
-      return JSON.parse(localStorage.getItem(storageKey) || "null");
+      const choice = JSON.parse(localStorage.getItem(storageKey) || "null");
+      if (!choice || !choice.savedAt || Date.now() - choice.savedAt > consentMaxAge) {
+        localStorage.removeItem(storageKey);
+        return null;
+      }
+      return choice;
     } catch (_) {
       return null;
     }
@@ -57,7 +63,7 @@
       window.dataLayer.push({ "gtm.start": Date.now(), event: "gtm.js" });
       injectScript(`https://www.googletagmanager.com/gtm.js?id=${encodeURIComponent(config.google_tag_manager_id)}`);
     }
-    if (config.google_analytics_id) {
+    if (config.google_analytics_id && !config.google_tag_manager_id) {
       injectScript(`https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(config.google_analytics_id)}`);
       window.gtag("js", new Date());
       window.gtag("config", config.google_analytics_id, { anonymize_ip: true });
@@ -105,7 +111,7 @@
 
   function save(choice) {
     try {
-      localStorage.setItem(storageKey, JSON.stringify(choice));
+      localStorage.setItem(storageKey, JSON.stringify({ ...choice, savedAt: Date.now() }));
     } catch (_) {
       // Die Auswahl gilt dann nur für den aktuellen Seitenaufruf.
     }
@@ -115,8 +121,26 @@
       window.gtag("consent", "update", { analytics_storage: "denied" });
     }
     if (window.fbq && !choice.marketing) window.fbq("consent", "revoke");
+    if (!choice.analytics) clearCookies(["_ga", "_gid", "_gat"]);
+    if (!choice.marketing) clearCookies(["_fbp", "_fbc", "_gcl"]);
     if (revokesLoadedService) window.location.reload();
     else apply(choice);
+  }
+
+  function clearCookies(prefixes) {
+    const names = document.cookie
+      .split(";")
+      .map((value) => value.split("=")[0].trim())
+      .filter((name) => prefixes.some((prefix) => name.startsWith(prefix)));
+    const hostParts = window.location.hostname.split(".");
+    const domains = [window.location.hostname];
+    if (hostParts.length >= 2) domains.push(`.${hostParts.slice(-2).join(".")}`);
+    for (const name of names) {
+      document.cookie = `${name}=; Max-Age=0; path=/; SameSite=Lax`;
+      for (const domain of domains) {
+        document.cookie = `${name}=; Max-Age=0; path=/; domain=${domain}; SameSite=Lax`;
+      }
+    }
   }
 
   function openDialog(force = false) {
@@ -127,13 +151,13 @@
     backdrop.innerHTML = `
       <section class="consent-dialog" role="dialog" aria-modal="true" aria-labelledby="consent-title" tabindex="-1">
         <h2 id="consent-title">Datenschutz-Einstellungen</h2>
-        <p>Notwendige Funktionen sind immer aktiv. Optionale Dienste laden wir erst nach Ihrer Zustimmung. Details stehen in der <a href="/datenschutz.html">Datenschutzerklärung</a>.</p>
+        <p>Notwendige Funktionen sind immer aktiv. Optionale Dienste laden wir erst nach Ihrer Einwilligung in das Speichern/Auslesen am Endgerät und die anschließende Datenverarbeitung. Details stehen in der <a href="/datenschutz.html">Datenschutzerklärung</a>.</p>
         <div class="consent-options">
           <label class="consent-option">
             <input type="checkbox" checked disabled />
             <span><strong>Notwendig</strong><small>Konvertierung, Sicherheit und Speicherung Ihrer Auswahl.</small></span>
           </label>
-          ${services.analytics ? `<label class="consent-option"><input id="consent-analytics" type="checkbox" ${stored.analytics ? "checked" : ""} /><span><strong>Statistik</strong><small>Google Analytics zur anonymisierten Reichweitenmessung.</small></span></label>` : ""}
+          ${services.analytics ? `<label class="consent-option"><input id="consent-analytics" type="checkbox" ${stored.analytics ? "checked" : ""} /><span><strong>Statistik</strong><small>Google Ireland: Tag Manager und Analytics zur Reichweitenmessung. Dabei können Nutzungsprofile entstehen und Daten in den USA verarbeitet werden.</small></span></label>` : ""}
           ${services.marketing ? `<label class="consent-option"><input id="consent-marketing" type="checkbox" ${stored.marketing ? "checked" : ""} /><span><strong>Marketing</strong><small>Meta Pixel und/oder KlickTipp, soweit konfiguriert.</small></span></label>` : ""}
         </div>
         <div class="consent-actions">

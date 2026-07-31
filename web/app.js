@@ -46,6 +46,55 @@ async function loadImprint() {
 
 loadImprint();
 
+async function initializeBilling() {
+  const forms = document.querySelectorAll(".checkout-form");
+  if (!forms.length) return;
+  try {
+    const response = await fetch("/api/billing/config");
+    const config = await response.json();
+    for (const form of forms) {
+      const button = form.querySelector("button");
+      if (!config.enabled) {
+        button.disabled = true;
+        form.querySelector(".checkout-note").textContent = "Bezahlbereich wird in Kürze freigeschaltet.";
+      }
+    }
+  } catch (_) {
+    for (const form of forms) form.querySelector("button").disabled = true;
+  }
+
+  const checkout = new URLSearchParams(window.location.search).get("checkout");
+  if (checkout === "success") {
+    document.querySelector("#preise").scrollIntoView({ behavior: "smooth" });
+    document.querySelector("#preise .eyebrow").textContent = "Zahlung erfolgreich – Freischaltung wird geprüft";
+  }
+
+  for (const form of forms) {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = form.querySelector("button");
+      const note = form.querySelector(".checkout-note");
+      button.disabled = true;
+      note.textContent = "Sicherer Stripe-Checkout wird geöffnet …";
+      try {
+        const response = await fetch("/api/billing/checkout", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ offer: form.dataset.offer, email: new FormData(form).get("email") }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Checkout konnte nicht geöffnet werden.");
+        window.location.assign(data.url);
+      } catch (error) {
+        note.textContent = error.message;
+        button.disabled = false;
+      }
+    });
+  }
+}
+
+initializeBilling();
+
 function showFile(file) {
   if (!file) return;
   fileTitle.textContent = file.name;
