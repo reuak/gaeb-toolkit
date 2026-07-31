@@ -212,9 +212,10 @@ async fn main() -> Result<()> {
         stripe: stripe_config(),
     });
     init_database(&state)?;
-    for notice in backfill_stripe_events(&state)? {
+    backfill_stripe_events(&state)?;
+    for notice in pending_billing_access_emails(&state)? {
         if let Err(error) = issue_billing_access_email(&state, &notice) {
-            error!(%error, email = %notice.email, "billing access email could not be sent");
+            error!(%error, email = %notice.email, "pending billing access email could not be sent");
         }
     }
 
@@ -556,14 +557,15 @@ fn record_and_apply_stripe_event(
             let subscription_id = object["subscription"].as_str().unwrap_or_default();
             transaction.execute(
                 "INSERT INTO billing_accounts
-                 (email, stripe_customer_id, stripe_subscription_id, pro_active, single_credits, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 (email, stripe_customer_id, stripe_subscription_id, pro_active, single_credits, updated_at, access_email_sent_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
                  ON CONFLICT(email) DO UPDATE SET
                    stripe_customer_id = CASE WHEN excluded.stripe_customer_id != '' THEN excluded.stripe_customer_id ELSE billing_accounts.stripe_customer_id END,
                    stripe_subscription_id = CASE WHEN excluded.stripe_subscription_id != '' THEN excluded.stripe_subscription_id ELSE billing_accounts.stripe_subscription_id END,
                    pro_active = MAX(billing_accounts.pro_active, excluded.pro_active),
                    single_credits = billing_accounts.single_credits + excluded.single_credits,
-                   updated_at = excluded.updated_at",
+                   updated_at = excluded.updated_at,
+                   access_email_sent_at = NULL",
                 params![
                     email,
                     customer_id,
@@ -1097,7 +1099,8 @@ fn init_database(state: &AppState) -> Result<()> {
            stripe_subscription_id TEXT NOT NULL DEFAULT '',
            pro_active INTEGER NOT NULL DEFAULT 0,
            single_credits INTEGER NOT NULL DEFAULT 0,
-           updated_at TEXT NOT NULL
+           updated_at TEXT NOT NULL,
+           access_email_sent_at TEXT
          );
          CREATE TABLE IF NOT EXISTS billing_access_tokens (
            token_hash TEXT PRIMARY KEY,
@@ -1126,6 +1129,12 @@ fn init_database(state: &AppState) -> Result<()> {
     ensure_job_column(&connection, "feature_updates_consent_at", "TEXT")?;
     ensure_job_column(&connection, "billing_tier", "TEXT NOT NULL DEFAULT 'free'")?;
     ensure_table_column(&connection, "stripe_events", "processed_at", "TEXT")?;
+    ensure_table_column(
+        &connection,
+        "billing_accounts",
+        "access_email_sent_at",
+        "TEXT",
+    )?;
     connection.execute(
         "UPDATE jobs
          SET status = 'failed',
@@ -1412,14 +1421,7 @@ fn send_fallback_email(
         .to(record.email.parse()?)
         .subject("GAEB-Konvertierung: prüfpflichtiger X83-Entwurf")
         .multipart(mixed)?;
-    let mut builder = SmtpTransport::relay(&smtp.host)?.port(smtp.port);
-    if !smtp.username.is_empty() {
-        builder = builder.credentials(Credentials::new(
-            smtp.username.clone(),
-            smtp.password.clone(),
-        ));
-    }
-    builder.build().send(&message)?;
+    smtp_transport(smtp)?.send(&message)?;
     Ok(())
 }
 
@@ -1449,6 +1451,25 @@ fn backfill_stripe_events(state: &AppState) -> Result<Vec<PurchaseNotice>> {
             notices.push(notice);
         }
     }
+    Ok(notices)
+}
+
+fn pending_billing_access_emails(state: &AppState) -> Result<Vec<PurchaseNotice>> {
+    let connection = Connection::open(&state.db_path)?;
+    let mut statement = connection.prepare(
+        "SELECT email, CASE WHEN pro_active = 1 THEN 'pro' ELSE 'single' END
+         FROM billing_accounts
+         WHERE access_email_sent_at IS NULL AND (pro_active = 1 OR single_credits > 0)",
+    )?;
+    let notices = statement
+        .query_map([], |row| {
+            Ok(PurchaseNotice {
+                email: row.get(0)?,
+                offer: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)?;
     Ok(notices)
 }
 
@@ -1493,15 +1514,28 @@ fn issue_billing_access_email(state: &AppState, notice: &PurchaseNotice) -> Resu
         .subject("Ihr Zugang zum GAEB-Konverter")
         .header(ContentType::TEXT_PLAIN)
         .body(body)?;
-    let mut builder = SmtpTransport::relay(&smtp.host)?.port(smtp.port);
+    smtp_transport(smtp)?.send(&message)?;
+    connection.execute(
+        "UPDATE billing_accounts SET access_email_sent_at = ?1 WHERE email = ?2",
+        params![Utc::now().to_rfc3339(), notice.email],
+    )?;
+    Ok(())
+}
+
+fn smtp_transport(smtp: &SmtpConfig) -> Result<SmtpTransport> {
+    let mut builder = if smtp.port == 465 {
+        SmtpTransport::relay(&smtp.host)?
+    } else {
+        SmtpTransport::starttls_relay(&smtp.host)?
+    }
+    .port(smtp.port);
     if !smtp.username.is_empty() {
         builder = builder.credentials(Credentials::new(
             smtp.username.clone(),
             smtp.password.clone(),
         ));
     }
-    builder.build().send(&message)?;
-    Ok(())
+    Ok(builder.build())
 }
 
 fn activate_access_token(db_path: &Path, token_hash: &str, session_hash: &str) -> Result<()> {
