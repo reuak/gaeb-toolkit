@@ -127,8 +127,25 @@ SMTP_PORT=587
 SMTP_USERNAME=gaeb@example.de
 SMTP_PASSWORD=change-me
 SMTP_FROM=gaeb@example.de
+GOOGLE_TAG_MANAGER_ID=GTM-TF86FD6Z
+GOOGLE_ANALYTICS_ID=
+META_PIXEL_ID=
+KLICKTIPP_PIXEL_URL=
+COOKIE_CONSENT_VERSION=1
 RUST_LOG=info
 ```
+
+Die Tracking-Einstellungen sind optional. Ohne Wert wird der jeweilige Dienst
+weder angezeigt noch geladen. `GOOGLE_TAG_MANAGER_ID` erwartet eine Container-ID
+wie `GTM-XXXXXXX`, `GOOGLE_ANALYTICS_ID` eine direkte GA4-ID wie
+`G-XXXXXXXXXX`, `META_PIXEL_ID` die numerische Pixel-ID und
+`KLICKTIPP_PIXEL_URL` die vollständige HTTPS-URL aus dem in KlickTipp erzeugten
+Tagging-Pixel. Externe Anfragen erfolgen erst nach der passenden Einwilligung im
+Cookie-Banner. Wird dessen Text oder Zweck wesentlich geändert, kann
+`COOKIE_CONSENT_VERSION` erhöht werden, damit die Auswahl erneut abgefragt wird.
+Im Tag-Manager-Container müssen die einzelnen Tags zusätzlich mit den passenden
+Consent-Anforderungen konfiguriert werden. Eine direkte GA4-ID ist nicht nötig,
+wenn GA4 bereits vollständig über den Tag Manager verwaltet wird.
 
 Vor dem öffentlichen Betrieb müssen insbesondere Impressum und
 Datenschutzerklärung die optionale Diagnosespeicherung, den SMTP-Versand, die

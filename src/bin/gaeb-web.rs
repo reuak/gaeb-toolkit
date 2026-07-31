@@ -49,6 +49,7 @@ struct AppState {
     smtp: Option<SmtpConfig>,
     http_client: reqwest::Client,
     imprint_cache: Arc<RwLock<Option<CachedImprint>>>,
+    tracking: PublicTrackingConfig,
 }
 
 #[derive(Clone)]
@@ -113,6 +114,15 @@ struct ImprintResponse {
     source_url: &'static str,
 }
 
+#[derive(Clone, Default, Serialize)]
+struct PublicTrackingConfig {
+    google_tag_manager_id: Option<String>,
+    google_analytics_id: Option<String>,
+    meta_pixel_id: Option<String>,
+    klicktipp_pixel_url: Option<String>,
+    consent_version: String,
+}
+
 struct JobRecord {
     id: String,
     token: String,
@@ -148,6 +158,7 @@ async fn main() -> Result<()> {
             .timeout(Duration::from_secs(12))
             .build()?,
         imprint_cache: Arc::new(RwLock::new(None)),
+        tracking: tracking_config(),
     });
     init_database(&state)?;
 
@@ -166,6 +177,7 @@ async fn main() -> Result<()> {
         .route("/api/convert", post(create_job))
         .route("/api/gaeb-to-pdf", post(gaeb_to_pdf))
         .route("/api/legal/imprint", get(imprint))
+        .route("/api/public-config", get(public_config))
         .route("/api/jobs/{id}", get(job_status))
         .route("/download/{id}/{token}", get(download))
         .fallback_service(ServeDir::new("web").append_index_html_on_directories(true))
@@ -183,6 +195,10 @@ async fn main() -> Result<()> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicTrackingConfig> {
+    Json(state.tracking.clone())
 }
 
 async fn imprint(State(state): State<Arc<AppState>>) -> Result<Json<ImprintResponse>, ApiError> {
@@ -986,6 +1002,58 @@ fn smtp_config() -> Option<SmtpConfig> {
     })
 }
 
+fn tracking_config() -> PublicTrackingConfig {
+    PublicTrackingConfig {
+        google_tag_manager_id: env::var("GOOGLE_TAG_MANAGER_ID")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| {
+                value.starts_with("GTM-")
+                    && value.len() <= 32
+                    && value.chars().all(|character| {
+                        character.is_ascii_uppercase()
+                            || character.is_ascii_digit()
+                            || character == '-'
+                    })
+            }),
+        google_analytics_id: env::var("GOOGLE_ANALYTICS_ID")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| {
+                value.starts_with("G-")
+                    && value.len() <= 32
+                    && value.chars().all(|character| {
+                        character.is_ascii_uppercase()
+                            || character.is_ascii_digit()
+                            || character == '-'
+                    })
+            }),
+        meta_pixel_id: env::var("META_PIXEL_ID")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 32
+                    && value.chars().all(|character| character.is_ascii_digit())
+            }),
+        klicktipp_pixel_url: env::var("KLICKTIPP_PIXEL_URL")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| {
+                value.starts_with("https://")
+                    && value.len() <= 2048
+                    && !value.chars().any(char::is_whitespace)
+            }),
+        consent_version: env::var("COOKIE_CONSENT_VERSION")
+            .unwrap_or_else(|_| "1".to_owned())
+            .trim()
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+            .take(32)
+            .collect::<String>(),
+    }
+}
+
 struct ApiError {
     status: StatusCode,
     message: String,
@@ -1104,6 +1172,7 @@ mod tests {
             smtp: None,
             http_client: reqwest::Client::new(),
             imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tracking: Default::default(),
         });
         init_database(&state).unwrap();
 
