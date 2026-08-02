@@ -1,0 +1,16 @@
+const account = document.querySelector("#account"), loginCard = document.querySelector("#login-card");
+const fmt = (bytes) => `${(bytes / 1024 / 1024).toFixed(bytes >= 1024*1024*1024 ? 0 : 1)} MB`;
+async function load() { const response = await fetch("/api/account"); if (response.status === 401) return; const data = await response.json(); if (!response.ok) return;
+  loginCard.hidden = true; account.hidden = false; document.querySelector("#account-email").textContent = data.email;
+  document.querySelector("#plan").textContent = data.plan === "pro" ? "GAEB Pro" : "Einzelkauf"; document.querySelector("#credits").textContent = `${data.single_credits} Credit(s) verfügbar`;
+  document.querySelector("#monthly-usage").textContent = `${data.monthly_conversions} von ${data.monthly_limit} Konvertierungen diesen Monat · beide Richtungen`;
+  document.querySelector("#storage").textContent = data.storage_limit_bytes ? `${fmt(data.storage_used_bytes)} von 2 GB` : `${fmt(data.storage_used_bytes)} · zeitlich begrenzte Ablage`;
+  document.querySelector("#storage-bar").style.width = data.storage_limit_bytes ? `${Math.min(100,data.storage_used_bytes/data.storage_limit_bytes*100)}%` : "0";
+  document.querySelector("#purchases").innerHTML = data.purchases.length ? data.purchases.map(p=>`<div class="account-row"><strong>${p.offer === "pro" ? "GAEB Pro" : "Einzelkonvertierung"}</strong><span>${new Date(p.created_at).toLocaleDateString("de-DE")} · ${p.status}</span></div>`).join("") : "<p>Noch keine Kaufhistorie vorhanden.</p>";
+  document.querySelector("#documents").innerHTML = data.documents.length ? data.documents.map(d=>`<div class="account-row"><div><strong>${escapeHtml(d.filename)}</strong><span>${fmt(d.size_bytes)} · ${new Date(d.created_at).toLocaleDateString("de-DE")}</span></div><div>${d.download_url?`<a href="${d.download_url}">Download</a>`:""} <button data-delete="${d.id}" class="text-button">Löschen</button></div></div>`).join("") : "<p>Noch keine bezahlten Dokumente vorhanden.</p>";
+}
+function escapeHtml(v){const e=document.createElement("div");e.textContent=v;return e.innerHTML;}
+document.querySelector("#login-form").addEventListener("submit",async e=>{e.preventDefault();const note=document.querySelector("#login-note");note.textContent="Link wird angefordert …";const response=await fetch("/api/account/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({email:new FormData(e.target).get("email")})});note.textContent=response.ok?"Falls ein Konto besteht, wurde der Magic-Link versendet.":((await response.json()).error||"Versand fehlgeschlagen.");});
+document.querySelector("#logout").addEventListener("click",async()=>{await fetch("/api/account/logout",{method:"POST"});location.reload();});
+document.querySelector("#portal").addEventListener("click",async()=>{const r=await fetch("/api/account/portal",{method:"POST"});const d=await r.json();if(r.ok) location.assign(d.url);else alert(d.error);});
+document.querySelector("#documents").addEventListener("click",async e=>{const id=e.target.dataset.delete;if(!id||!confirm("Dokument endgültig löschen?"))return;const r=await fetch(`/api/account/documents/${id}`,{method:"DELETE"});if(r.ok)load();}); load();

@@ -83,7 +83,8 @@ Die erste Webversion bietet:
 - Kontaktdaten und Einwilligung
 - drei kostenlose Konvertierungen pro E-Mail und Monat, jeweils bis 50 Positionen
 - asynchrone PDF-zu-X83-Konvertierung
-- direkte GAEB-DA-XML-X81-bis-X86-zu-PDF-Lesefassung ohne Auftragsspeicherung
+- direkte GAEB-DA-XML-X81-bis-X86-zu-PDF-Lesefassung ohne Dokumentenspeicherung
+- gemeinsames Monatskontingent für beide Richtungen: 3 kostenlos, 100 mit aktivem Pro-Abo
 - geschützten Download-Link
 - automatische Löschung nach 24 Stunden
 - optionaler, ausdrücklich prüfpflichtiger X83-Entwurf mit Original-PDF und
@@ -137,8 +138,18 @@ STRIPE_SECRET_KEY=
 STRIPE_WEBHOOK_SECRET=
 STRIPE_SINGLE_PRICE_ID=
 STRIPE_PRO_PRICE_ID=
+SINGLE_NET_CENTS=990
+PRO_NET_CENTS=1900
+OFFER_BANNER_TEXT=
+ADMIN_TOKEN=
 RUST_LOG=info
 ```
+
+Die angezeigten Cent-Beträge müssen immer exakt zu den hinterlegten Stripe-Price-IDs
+passen. Für einen Aktionspreis werden in Stripe neue Preise angelegt und anschließend
+Price-ID und Cent-Betrag gemeinsam umgestellt. `OFFER_BANNER_TEXT` aktiviert optional
+ein Aktionsbanner. Der interne Bereich `/admin.html` ist nur verfügbar, wenn ein langer,
+zufälliger `ADMIN_TOKEN` gesetzt wurde.
 
 ### Stripe im Testmodus
 

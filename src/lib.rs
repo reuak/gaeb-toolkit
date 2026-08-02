@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::Path, process::Command};
+use std::{collections::HashSet, fs, path::Path, process::Command};
 
 use anyhow::{bail, Context};
 
@@ -44,13 +44,23 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
         );
     }
 
-    let text = String::from_utf8(output.stdout).context("PDF-Text ist nicht UTF-8")?;
+    let extracted = String::from_utf8(output.stdout).context("PDF-Text ist nicht UTF-8")?;
+    let (text, ocr_used) = if extracted.chars().filter(|c| !c.is_whitespace()).count() < 80 {
+        (ocr_pdf_text(path)?, true)
+    } else {
+        (extracted, false)
+    };
     let source = path
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("input.pdf");
 
     let mut boq = parser::parse_text(source, &text)?;
+    if ocr_used {
+        boq.warnings.push(
+            "OCR-Vorprüfung verwendet: Das PDF enthielt keine ausreichende Textebene.".to_owned(),
+        );
+    }
     placeholder_oz::recover_placeholder_positions_from_text(&text, &mut boq)?;
     reference_cleanup::repair_split_references(&mut boq);
     pdf_cleanup::postprocess_pdf(path, &mut boq)?;
@@ -58,6 +68,66 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
     price_cleanup::validate_and_repair_prices(&mut boq);
     provisional_validation::validate_provisional_totals(&text, &mut boq);
     Ok(boq)
+}
+
+fn ocr_pdf_text(path: &Path) -> anyhow::Result<String> {
+    let directory = tempfile::tempdir()?;
+    let prefix = directory.path().join("page");
+    let rendered = Command::new("pdftoppm")
+        .args([
+            "-png",
+            "-r",
+            "200",
+            path.to_string_lossy().as_ref(),
+            prefix.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .context("PDF-Seiten konnten für OCR nicht gerendert werden")?;
+    if !rendered.status.success() {
+        bail!(
+            "PDF-Seiten konnten für OCR nicht gerendert werden: {}",
+            String::from_utf8_lossy(&rendered.stderr).trim()
+        );
+    }
+    let mut pages = fs::read_dir(directory.path())?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|entry| entry.extension().and_then(|v| v.to_str()) == Some("png"))
+        .collect::<Vec<_>>();
+    pages.sort();
+    let mut text = String::new();
+    for page in pages {
+        let output = Command::new("tesseract")
+            .arg(&page)
+            .arg("stdout")
+            .args([
+                "-l",
+                "deu+eng",
+                "--psm",
+                "6",
+                "-c",
+                "preserve_interword_spaces=1",
+            ])
+            .output()
+            .context("Das PDF ist ein Scan, aber die deutsche OCR ist nicht installiert")?;
+        if !output.status.success() {
+            bail!(
+                "Deutsche OCR ist fehlgeschlagen: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        text.push_str(&String::from_utf8_lossy(&output.stdout));
+        text.push('\u{000C}');
+    }
+    // Nachtragsangebote verwenden häufig "NA 15.10" statt einer mindestens
+    // dreiteiligen GAEB-OZ. Die synthetische Endstelle bleibt reproduzierbar.
+    normalize_offer_oz(&text)
+}
+
+fn normalize_offer_oz(text: &str) -> anyhow::Result<String> {
+    let offer_oz = regex::Regex::new(r"(?m)^\s*NA\s+(\d+)\.(\d+)\s+")?;
+    Ok(offer_oz
+        .replace_all(text, "$1.$2.001 NA $1.$2 ")
+        .into_owned())
 }
 
 /// Liefert nur echte X83-Konflikte. Bei Positionen mit dem Vermerk
@@ -128,6 +198,15 @@ fn is_omitted_position(position: &Position) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_short_na_number_for_gaeb_hierarchy() {
+        let text = "NA 15.10 Anschluss GK-Wand\n1,000 m 8,25 8,25";
+        assert_eq!(
+            normalize_offer_oz(text).unwrap(),
+            "15.10.001 NA 15.10 Anschluss GK-Wand\n1,000 m 8,25 8,25"
+        );
+    }
 
     #[test]
     fn omitted_position_needs_no_quantity_or_unit() {

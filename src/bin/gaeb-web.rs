@@ -13,7 +13,7 @@ use axum::{
     extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use chrono::{Duration as ChronoDuration, Utc};
@@ -39,6 +39,7 @@ use uuid::Uuid;
 
 const DEFAULT_MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_PAID_MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+const PRO_STORAGE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 const IMPRINT_URL: &str = "https://www.hawkvision.de/impressum/";
 const IMPRINT_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
@@ -55,6 +56,15 @@ struct AppState {
     imprint_cache: Arc<RwLock<Option<CachedImprint>>>,
     tracking: PublicTrackingConfig,
     stripe: Option<StripeConfig>,
+    offer: OfferConfig,
+    admin_token_hash: Option<String>,
+}
+
+#[derive(Clone)]
+struct OfferConfig {
+    single_net_cents: u32,
+    pro_net_cents: u32,
+    banner: Option<String>,
 }
 
 #[derive(Clone)]
@@ -90,6 +100,7 @@ struct UploadForm {
     consent: bool,
     email_fallback_consent: bool,
     feature_updates_consent: bool,
+    confirm_structure: bool,
     filename: String,
     pdf: Vec<u8>,
 }
@@ -121,6 +132,65 @@ struct BillingConfigResponse {
     enabled: bool,
     single_net_cents: u32,
     pro_net_cents: u32,
+    offer_banner: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReviewRequest {
+    job_id: String,
+    rating: u8,
+    text: String,
+}
+#[derive(Deserialize)]
+struct ReviewModerationRequest {
+    job_id: String,
+}
+#[derive(Serialize)]
+struct PublicReview {
+    rating: u8,
+    text: String,
+    created_at: String,
+}
+#[derive(Deserialize)]
+struct SupportRequest {
+    subject: String,
+    text: String,
+}
+#[derive(Serialize)]
+struct ReviewEligibilityResponse {
+    eligible: bool,
+    submitted: bool,
+}
+#[derive(Serialize)]
+struct AdminOverviewResponse {
+    customers: Vec<AdminCustomer>,
+    reviews: Vec<AdminReview>,
+    support_cases: Vec<AdminSupportCase>,
+}
+#[derive(Serialize)]
+struct AdminCustomer {
+    email: String,
+    plan: String,
+    credits: i64,
+    updated_at: String,
+}
+#[derive(Serialize)]
+struct AdminReview {
+    job_id: String,
+    email: String,
+    rating: u8,
+    text: String,
+    created_at: String,
+    status: String,
+}
+#[derive(Serialize)]
+struct AdminSupportCase {
+    id: String,
+    email: String,
+    subject: String,
+    text: String,
+    status: String,
+    created_at: String,
 }
 
 #[derive(Serialize)]
@@ -140,6 +210,57 @@ struct CheckoutRequest {
 #[derive(Serialize)]
 struct CheckoutResponse {
     url: String,
+}
+
+#[derive(Deserialize)]
+struct EmailRequest {
+    email: String,
+}
+
+#[derive(Deserialize)]
+struct CheckoutSessionRequest {
+    session_id: String,
+}
+
+#[derive(Serialize)]
+struct CheckoutStatusResponse {
+    status: String,
+    offer: String,
+    email_hint: String,
+    access_ready: bool,
+    can_resend: bool,
+}
+
+#[derive(Serialize)]
+struct AccountResponse {
+    email: String,
+    plan: String,
+    single_credits: i64,
+    storage_used_bytes: i64,
+    storage_limit_bytes: i64,
+    monthly_conversions: u32,
+    monthly_limit: u32,
+    purchases: Vec<PurchaseResponse>,
+    documents: Vec<DocumentResponse>,
+}
+
+#[derive(Serialize)]
+struct PurchaseResponse {
+    id: String,
+    offer: String,
+    status: String,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct DocumentResponse {
+    id: String,
+    filename: String,
+    status: String,
+    size_bytes: i64,
+    created_at: String,
+    expires_at: String,
+    download_url: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -210,6 +331,8 @@ async fn main() -> Result<()> {
         imprint_cache: Arc::new(RwLock::new(None)),
         tracking: tracking_config(),
         stripe: stripe_config(),
+        offer: offer_config(),
+        admin_token_hash: required_env("ADMIN_TOKEN").map(|value| hash_token(&value)),
     });
     init_database(&state)?;
     backfill_stripe_events(&state)?;
@@ -238,6 +361,26 @@ async fn main() -> Result<()> {
         .route("/api/billing/config", get(billing_config))
         .route("/api/billing/status", get(billing_status))
         .route("/api/billing/checkout", post(create_checkout))
+        .route("/api/billing/checkout-status", get(checkout_status))
+        .route("/api/billing/resend-access", post(resend_access))
+        .route("/api/account/login", post(request_account_login))
+        .route("/api/account/logout", post(account_logout))
+        .route("/api/account", get(account_overview))
+        .route("/api/account/portal", post(create_customer_portal))
+        .route(
+            "/api/account/documents/{id}",
+            delete(delete_account_document),
+        )
+        .route(
+            "/api/account/documents/{id}/download",
+            get(download_account_document),
+        )
+        .route("/api/reviews/eligibility", get(review_eligibility))
+        .route("/api/reviews", post(create_review))
+        .route("/api/reviews/public", get(public_reviews))
+        .route("/api/admin/reviews/approve", post(approve_review))
+        .route("/api/support", post(create_support_case))
+        .route("/api/admin/overview", get(admin_overview))
         .route("/api/stripe/webhook", post(stripe_webhook))
         .route("/billing/access/{token}", get(activate_billing_access))
         .route("/api/jobs/{id}", get(job_status))
@@ -284,8 +427,9 @@ async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicTrackin
 async fn billing_config(State(state): State<Arc<AppState>>) -> Json<BillingConfigResponse> {
     Json(BillingConfigResponse {
         enabled: state.stripe.is_some(),
-        single_net_cents: 990,
-        pro_net_cents: 1900,
+        single_net_cents: state.offer.single_net_cents,
+        pro_net_cents: state.offer.pro_net_cents,
+        offer_banner: state.offer.banner.clone(),
     })
 }
 
@@ -341,7 +485,7 @@ async fn create_checkout(
         _ => return Err(ApiError::bad_request("Unbekanntes Angebot.")),
     };
     let success_url = format!(
-        "{}/?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
+        "{}/checkout-erfolg.html?session_id={{CHECKOUT_SESSION_ID}}",
         stripe.public_base_url
     );
     let cancel_url = format!("{}/?checkout=cancelled#preise", stripe.public_base_url);
@@ -390,8 +534,555 @@ async fn create_checkout(
         .get("url")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| ApiError::upstream("Stripe hat keine Checkout-Adresse geliefert."))?;
+    let session_id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ApiError::upstream("Stripe hat keine Checkout-ID geliefert."))?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    connection.execute(
+        "INSERT OR REPLACE INTO checkout_sessions (id, email, offer, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'pending', ?4, ?4)",
+        params![session_id, email, request.offer, Utc::now().to_rfc3339()],
+    ).map_err(|_| ApiError::internal())?;
     Ok(Json(CheckoutResponse {
         url: url.to_owned(),
+    }))
+}
+
+async fn checkout_status(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<CheckoutStatusResponse>, ApiError> {
+    let id = query
+        .get("session_id")
+        .filter(|v| v.starts_with("cs_") && v.len() <= 255)
+        .ok_or_else(|| ApiError::bad_request("Ungültige Checkout-ID."))?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let row: Option<(String, String, String, Option<String>)> = connection.query_row(
+        "SELECT email, offer, status, access_email_sent_at FROM checkout_sessions WHERE id = ?1",
+        [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).optional().map_err(|_| ApiError::internal())?;
+    let (email, offer, status, sent_at) =
+        row.ok_or_else(|| ApiError::not_found("Checkout nicht gefunden."))?;
+    let access_ready = status == "paid";
+    let can_resend = access_ready
+        && sent_at
+            .as_deref()
+            .and_then(parse_time)
+            .map_or(true, |sent| Utc::now() - sent >= ChronoDuration::minutes(2));
+    Ok(Json(CheckoutStatusResponse {
+        status,
+        offer,
+        email_hint: mask_email(&email),
+        access_ready,
+        can_resend,
+    }))
+}
+
+async fn resend_access(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CheckoutSessionRequest>,
+) -> Result<StatusCode, ApiError> {
+    let notice = checkout_notice_for_resend(&state.db_path, &request.session_id)
+        .map_err(|_| ApiError::internal())?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Der Zugangslink wurde bereits kürzlich versendet.",
+            )
+        })?;
+    issue_billing_access_email(&state, &notice).map_err(|_| ApiError::internal())?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    connection
+        .execute(
+            "UPDATE checkout_sessions SET access_email_sent_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), request.session_id],
+        )
+        .map_err(|_| ApiError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn request_account_login(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<EmailRequest>,
+) -> Result<StatusCode, ApiError> {
+    let email = request.email.trim().to_lowercase();
+    if !valid_email(&email) {
+        return Err(ApiError::bad_request(
+            "Bitte eine gültige E-Mail-Adresse angeben.",
+        ));
+    }
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let last_sent: Option<String> = connection
+        .query_row(
+            "SELECT access_email_sent_at FROM billing_accounts WHERE email = ?1",
+            [&email],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| ApiError::internal())?
+        .flatten();
+    let may_send = last_sent
+        .as_deref()
+        .and_then(parse_time)
+        .map_or(true, |at| Utc::now() - at >= ChronoDuration::minutes(2));
+    if may_send
+        && connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM billing_accounts WHERE email=?1)",
+                [&email],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+    {
+        issue_billing_access_email(
+            &state,
+            &PurchaseNotice {
+                email,
+                offer: "account".into(),
+            },
+        )
+        .map_err(|_| ApiError::internal())?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn account_logout() -> Response {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "gaeb_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
+        ),
+    );
+    response
+}
+
+async fn account_overview(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<AccountResponse>, ApiError> {
+    let access = billing_access_from_headers(&state, &headers)
+        .map_err(|_| ApiError::internal())?
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "Bitte zuerst per Magic-Link anmelden.",
+            )
+        })?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let (pro, credits): (bool, i64) = connection
+        .query_row(
+            "SELECT pro_active, single_credits FROM billing_accounts WHERE email = ?1",
+            [&access.email],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| ApiError::internal())?;
+    let purchases = {
+        let mut stmt = connection.prepare("SELECT id, offer, status, created_at FROM purchases WHERE email = ?1 ORDER BY created_at DESC")
+            .map_err(|_| ApiError::internal())?;
+        let rows = stmt
+            .query_map([&access.email], |r| {
+                Ok(PurchaseResponse {
+                    id: r.get(0)?,
+                    offer: r.get(1)?,
+                    status: r.get(2)?,
+                    created_at: r.get(3)?,
+                })
+            })
+            .map_err(|_| ApiError::internal())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| ApiError::internal())?
+    };
+    let documents = {
+        let mut stmt = connection
+            .prepare(
+                "SELECT id, filename, status, file_size_bytes, created_at, expires_at FROM jobs
+             WHERE email = ?1 AND billing_tier != 'free' ORDER BY created_at DESC",
+            )
+            .map_err(|_| ApiError::internal())?;
+        let rows = stmt
+            .query_map([&access.email], |r| {
+                let id: String = r.get(0)?;
+                let status: String = r.get(2)?;
+                Ok(DocumentResponse {
+                    download_url: (status == "ready")
+                        .then(|| format!("/api/account/documents/{id}/download")),
+                    id,
+                    filename: r.get(1)?,
+                    status,
+                    size_bytes: r.get(3)?,
+                    created_at: r.get(4)?,
+                    expires_at: r.get(5)?,
+                })
+            })
+            .map_err(|_| ApiError::internal())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| ApiError::internal())?
+    };
+    let storage_used_bytes = documents
+        .iter()
+        .filter(|d| d.status != "failed")
+        .map(|d| d.size_bytes)
+        .sum();
+    let usage_tier = if pro { "pro" } else { "free" };
+    let job_usage: u32 = connection.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE email=?1 AND billing_tier=?2 AND status!='failed' AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')",
+        params![access.email, usage_tier], |r| r.get(0)).map_err(|_| ApiError::internal())?;
+    let direct_usage: u32 = connection.query_row(
+        "SELECT COUNT(*) FROM conversion_usage WHERE email=?1 AND billing_tier=?2 AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')",
+        params![access.email, usage_tier], |r| r.get(0)).map_err(|_| ApiError::internal())?;
+    Ok(Json(AccountResponse {
+        email: access.email,
+        plan: if pro { "pro" } else { "single" }.into(),
+        single_credits: credits,
+        storage_used_bytes,
+        storage_limit_bytes: if pro { PRO_STORAGE_BYTES } else { 0 },
+        monthly_conversions: job_usage.saturating_add(direct_usage),
+        monthly_limit: if pro { 100 } else { 3 },
+        purchases,
+        documents,
+    }))
+}
+
+async fn create_customer_portal(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<CheckoutResponse>, ApiError> {
+    let access = billing_access_from_headers(&state, &headers)
+        .map_err(|_| ApiError::internal())?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Bitte zuerst anmelden."))?;
+    let stripe = state
+        .stripe
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("Stripe ist nicht konfiguriert."))?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let customer: String = connection
+        .query_row(
+            "SELECT stripe_customer_id FROM billing_accounts WHERE email=?1",
+            [&access.email],
+            |r| r.get(0),
+        )
+        .map_err(|_| ApiError::bad_request("Für dieses Konto ist kein Stripe-Kunde hinterlegt."))?;
+    if customer.is_empty() {
+        return Err(ApiError::bad_request(
+            "Für dieses Konto ist kein Stripe-Kunde hinterlegt.",
+        ));
+    }
+    let return_url = format!("{}/konto.html", stripe.public_base_url);
+    let response = state
+        .http_client
+        .post("https://api.stripe.com/v1/billing_portal/sessions")
+        .bearer_auth(&stripe.secret_key)
+        .form(&[
+            ("customer", customer.as_str()),
+            ("return_url", return_url.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|_| ApiError::upstream("Stripe ist vorübergehend nicht erreichbar."))?;
+    let body = response
+        .text()
+        .await
+        .map_err(|_| ApiError::upstream("Stripe hat ungültig geantwortet."))?;
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|_| ApiError::upstream("Stripe hat ungültig geantwortet."))?;
+    let url = value
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::upstream("Das Kundenportal konnte nicht geöffnet werden."))?;
+    Ok(Json(CheckoutResponse { url: url.into() }))
+}
+
+async fn delete_account_document(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, ApiError> {
+    let access = billing_access_from_headers(&state, &headers)
+        .map_err(|_| ApiError::internal())?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Bitte zuerst anmelden."))?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let changed = connection
+        .execute(
+            "DELETE FROM jobs WHERE id=?1 AND email=?2",
+            params![id, access.email],
+        )
+        .map_err(|_| ApiError::internal())?;
+    if changed == 0 {
+        return Err(ApiError::not_found("Dokument nicht gefunden."));
+    }
+    fs::remove_dir_all(state.data_dir.join("jobs").join(&id))
+        .await
+        .ok();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn download_account_document(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Response, ApiError> {
+    let access = billing_access_from_headers(&state, &headers)
+        .map_err(|_| ApiError::internal())?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Bitte zuerst anmelden."))?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let filename: String = connection
+        .query_row(
+            "SELECT filename FROM jobs WHERE id=?1 AND email=?2 AND status='ready'",
+            params![id, access.email],
+            |r| r.get(0),
+        )
+        .map_err(|_| ApiError::not_found("Dokument nicht gefunden."))?;
+    let bytes = fs::read(state.data_dir.join("jobs").join(&id).join("output.x83"))
+        .await
+        .map_err(|_| ApiError::not_found("Datei nicht gefunden."))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/xml; charset=utf-8"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!(
+            "attachment; filename=\"{}\"",
+            output_filename(&filename)
+        ))
+        .map_err(|_| ApiError::internal())?,
+    );
+    Ok((headers, Body::from(bytes)).into_response())
+}
+
+async fn review_eligibility(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<ReviewEligibilityResponse>, ApiError> {
+    let access = billing_access_from_headers(&state, &headers)
+        .map_err(|_| ApiError::internal())?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Bitte zuerst anmelden."))?;
+    let job_id = query
+        .get("job_id")
+        .ok_or_else(|| ApiError::bad_request("Auftrags-ID fehlt."))?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let eligible: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND email=?2 AND status='ready' AND billing_tier IN('single','pro'))",
+        params![job_id,access.email], |r| r.get(0)).map_err(|_| ApiError::internal())?;
+    let submitted: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM reviews WHERE job_id=?1)",
+            [job_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| ApiError::internal())?;
+    Ok(Json(ReviewEligibilityResponse {
+        eligible,
+        submitted,
+    }))
+}
+
+async fn create_review(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<ReviewRequest>,
+) -> Result<StatusCode, ApiError> {
+    let access = billing_access_from_headers(&state, &headers)
+        .map_err(|_| ApiError::internal())?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Bitte zuerst anmelden."))?;
+    if !(1..=5).contains(&request.rating) {
+        return Err(ApiError::bad_request("Bitte 1 bis 5 Sterne wählen."));
+    }
+    let text = request.text.trim();
+    if text.chars().count() > 2000 {
+        return Err(ApiError::bad_request("Die Bewertung ist zu lang."));
+    }
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let eligible:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE id=?1 AND email=?2 AND status='ready' AND billing_tier IN('single','pro'))",params![request.job_id,access.email],|r|r.get(0)).map_err(|_|ApiError::internal())?;
+    if !eligible {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Bewertungen sind nach einer erfolgreichen bezahlten Konvertierung möglich.",
+        ));
+    }
+    connection
+        .execute(
+            "INSERT INTO reviews(job_id,email,rating,text,created_at,status,moderated_text) VALUES(?1,?2,?3,?4,?5,'pending','')",
+            params![
+                request.job_id,
+                access.email,
+                request.rating,
+                text,
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "Für diese Konvertierung wurde bereits eine Bewertung abgegeben.",
+            )
+        })?;
+    Ok(StatusCode::CREATED)
+}
+
+async fn public_reviews(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<PublicReview>>, ApiError> {
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let mut statement=connection.prepare("SELECT rating,moderated_text,created_at FROM reviews WHERE status='approved' ORDER BY created_at DESC LIMIT 12").map_err(|_|ApiError::internal())?;
+    let rows = statement
+        .query_map([], |r| {
+            Ok(PublicReview {
+                rating: r.get(0)?,
+                text: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })
+        .map_err(|_| ApiError::internal())?;
+    Ok(Json(
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| ApiError::internal())?,
+    ))
+}
+
+async fn approve_review(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<ReviewModerationRequest>,
+) -> Result<StatusCode, ApiError> {
+    require_admin(&state, &headers)?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let text: String = connection
+        .query_row(
+            "SELECT text FROM reviews WHERE job_id=?1",
+            [&request.job_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| ApiError::not_found("Review nicht gefunden."))?;
+    connection
+        .execute(
+            "UPDATE reviews SET status='approved',moderated_text=?1 WHERE job_id=?2",
+            params![mask_profanity(&text), request.job_id],
+        )
+        .map_err(|_| ApiError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn mask_profanity(text: &str) -> String {
+    let expression =
+        regex::RegexBuilder::new(r"\b(arschloch|schei(?:ß|ss)e|wichser|hurensohn|fotze|idiot)\b")
+            .case_insensitive(true)
+            .build()
+            .expect("valid moderation regex");
+    expression
+        .replace_all(text, |captures: &regex::Captures<'_>| {
+            "*".repeat(captures[0].chars().count())
+        })
+        .into_owned()
+}
+
+fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let supplied = headers
+        .get("x-admin-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let Some(expected) = state.admin_token_hash.as_ref() else {
+        return Err(ApiError::not_found("Adminbereich ist nicht konfiguriert."));
+    };
+    if hash_token(supplied) != *expected {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "Admin-Zugang nicht gültig.",
+        ));
+    }
+    Ok(())
+}
+
+async fn create_support_case(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SupportRequest>,
+) -> Result<StatusCode, ApiError> {
+    let access = billing_access_from_headers(&state, &headers)
+        .map_err(|_| ApiError::internal())?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Bitte zuerst anmelden."))?;
+    let subject = request.subject.trim();
+    let text = request.text.trim();
+    if subject.chars().count() < 3
+        || subject.chars().count() > 160
+        || text.chars().count() < 10
+        || text.chars().count() > 5000
+    {
+        return Err(ApiError::bad_request(
+            "Bitte Betreff und Beschreibung vollständig ausfüllen.",
+        ));
+    }
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    connection.execute("INSERT INTO support_cases(id,email,subject,text,status,created_at,updated_at) VALUES(?1,?2,?3,?4,'open',?5,?5)",
+        params![Uuid::new_v4().simple().to_string(),access.email,subject,text,Utc::now().to_rfc3339()]).map_err(|_|ApiError::internal())?;
+    Ok(StatusCode::CREATED)
+}
+
+async fn admin_overview(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<AdminOverviewResponse>, ApiError> {
+    require_admin(&state, &headers)?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let customers = {
+        let mut s=connection.prepare("SELECT email,CASE WHEN pro_active=1 THEN 'pro' ELSE 'single' END,single_credits,updated_at FROM billing_accounts ORDER BY updated_at DESC").map_err(|_|ApiError::internal())?;
+        let rows = s
+            .query_map([], |r| {
+                Ok(AdminCustomer {
+                    email: r.get(0)?,
+                    plan: r.get(1)?,
+                    credits: r.get(2)?,
+                    updated_at: r.get(3)?,
+                })
+            })
+            .map_err(|_| ApiError::internal())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| ApiError::internal())?
+    };
+    let reviews = {
+        let mut s = connection
+            .prepare("SELECT job_id,email,rating,text,created_at,status FROM reviews ORDER BY created_at DESC")
+            .map_err(|_| ApiError::internal())?;
+        let rows = s
+            .query_map([], |r| {
+                Ok(AdminReview {
+                    job_id: r.get(0)?,
+                    email: r.get(1)?,
+                    rating: r.get(2)?,
+                    text: r.get(3)?,
+                    created_at: r.get(4)?,
+                    status: r.get(5)?,
+                })
+            })
+            .map_err(|_| ApiError::internal())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| ApiError::internal())?
+    };
+    let support_cases = {
+        let mut s=connection.prepare("SELECT id,email,subject,text,status,created_at FROM support_cases ORDER BY created_at DESC").map_err(|_|ApiError::internal())?;
+        let rows = s
+            .query_map([], |r| {
+                Ok(AdminSupportCase {
+                    id: r.get(0)?,
+                    email: r.get(1)?,
+                    subject: r.get(2)?,
+                    text: r.get(3)?,
+                    status: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })
+            .map_err(|_| ApiError::internal())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| ApiError::internal())?
+    };
+    Ok(Json(AdminOverviewResponse {
+        customers,
+        reviews,
+        support_cases,
     }))
 }
 
@@ -454,17 +1145,23 @@ async fn activate_billing_access(
     let token_hash = hash_token(&token);
     let session_hash = hash_token(&raw_session);
     let db_path = state.db_path.clone();
-    task::spawn_blocking(move || activate_access_token(&db_path, &token_hash, &session_hash))
-        .await
-        .map_err(|_| ApiError::internal())?
-        .map_err(|error| {
-            error!(%error, "billing access token could not be activated");
-            ApiError::bad_request("Der Zugangslink ist ungültig oder abgelaufen.")
-        })?;
+    let redirect_path =
+        task::spawn_blocking(move || activate_access_token(&db_path, &token_hash, &session_hash))
+            .await
+            .map_err(|_| ApiError::internal())?
+            .map_err(|error| {
+                error!(%error, "billing access token could not be activated");
+                ApiError::bad_request("Der Zugangslink ist ungültig oder abgelaufen.")
+            })?;
     let cookie = format!(
         "gaeb_session={raw_session}; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=Lax"
     );
-    let mut response = Redirect::to("/?billing=ready#preise").into_response();
+    let target = if redirect_path == "/konto.html" {
+        "/konto.html"
+    } else {
+        "/?billing=ready#preise"
+    };
+    let mut response = Redirect::to(target).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie).map_err(|_| ApiError::internal())?,
@@ -544,6 +1241,7 @@ fn record_and_apply_stripe_event(
     let object = &event["data"]["object"];
     let notice = match event_type {
         "checkout.session.completed" if object["payment_status"].as_str() == Some("paid") => {
+            let checkout_id = object["id"].as_str().unwrap_or_default();
             let email = object["customer_details"]["email"]
                 .as_str()
                 .or_else(|| object["customer_email"].as_str())
@@ -575,6 +1273,22 @@ fn record_and_apply_stripe_event(
                     Utc::now().to_rfc3339()
                 ],
             )?;
+            transaction.execute(
+                "UPDATE checkout_sessions SET status='paid', updated_at=?1 WHERE id=?2",
+                params![Utc::now().to_rfc3339(), checkout_id],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO purchases (id, email, offer, status, stripe_customer_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'paid', ?4, ?5, ?5)",
+                params![checkout_id, email, offer, customer_id, Utc::now().to_rfc3339()],
+            )?;
+            if offer == "single" {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO credit_ledger (id, email, amount, reason, reference_id, created_at)
+                     VALUES (?1, ?2, 1, 'purchase', ?3, ?4)",
+                    params![format!("purchase:{checkout_id}"), email, checkout_id, Utc::now().to_rfc3339()],
+                )?;
+            }
             matches!(offer.as_str(), "single" | "pro").then_some(PurchaseNotice { email, offer })
         }
         "invoice.paid" => {
@@ -711,10 +1425,13 @@ fn normalized_text<'a>(parts: impl Iterator<Item = &'a str>) -> String {
 
 async fn gaeb_to_pdf(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Response, ApiError> {
     let mut filename = "leistungsverzeichnis.x83".to_owned();
     let mut gaeb = Vec::new();
+    let mut email = String::new();
+    let mut consent = false;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -727,17 +1444,50 @@ async fn gaeb_to_pdf(
                 .await
                 .map_err(|_| ApiError::bad_request("GAEB-Datei konnte nicht gelesen werden."))?
                 .to_vec();
+        } else {
+            let name = field.name().unwrap_or_default().to_owned();
+            let value = field
+                .text()
+                .await
+                .map_err(|_| ApiError::bad_request("Formularfeld konnte nicht gelesen werden."))?;
+            match name.as_str() {
+                "email" => email = value.trim().to_lowercase(),
+                "consent" => consent = matches!(value.as_str(), "true" | "on"),
+                _ => {}
+            }
         }
     }
     if gaeb.is_empty() {
         return Err(ApiError::bad_request("Bitte eine GAEB-Datei auswählen."));
     }
-    if gaeb.len() > state.max_upload_bytes {
+    let access = billing_access_from_headers(&state, &headers).map_err(|_| ApiError::internal())?;
+    let (account_email, tier, allowed_bytes, monthly_limit) =
+        gaeb_conversion_access(&state, access.as_ref(), &email, consent)?;
+    if gaeb.len() > allowed_bytes {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "Die GAEB-Datei ist größer als 2 MB.",
+            format!(
+                "Diese Zugangsart akzeptiert maximal {} MB.",
+                allowed_bytes / 1024 / 1024
+            ),
         ));
     }
+    let usage_id = Uuid::new_v4().simple().to_string();
+    reserve_conversion_usage(
+        &state.db_path,
+        &usage_id,
+        &account_email,
+        "gaeb_to_pdf",
+        tier,
+        monthly_limit,
+    )
+    .map_err(|error| match error.downcast_ref::<UsageLimitReached>() {
+        Some(_) => ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!("Das gemeinsame Monatslimit von {monthly_limit} Konvertierungen ist erreicht."),
+        ),
+        None => ApiError::internal(),
+    })?;
     let input_name = safe_filename(&filename);
     let output_name = format!(
         "{}.pdf",
@@ -748,7 +1498,7 @@ async fn gaeb_to_pdf(
                 .unwrap_or("leistungsverzeichnis")
         )
     );
-    let bytes = task::spawn_blocking(move || -> Result<Vec<u8>> {
+    let bytes_result = task::spawn_blocking(move || -> Result<Vec<u8>> {
         let directory = tempfile::tempdir()?;
         let input = directory.path().join(input_name);
         let output = directory.path().join("leistungsverzeichnis.pdf");
@@ -758,8 +1508,16 @@ async fn gaeb_to_pdf(
         Ok(std::fs::read(output)?)
     })
     .await
-    .map_err(|_| ApiError::internal())?
-    .map_err(|error| ApiError::bad_request(format!("GAEB-Datei nicht lesbar: {error}")))?;
+    .map_err(|_| ApiError::internal())?;
+    let bytes = match bytes_result {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            release_conversion_usage(&state.db_path, &usage_id);
+            return Err(ApiError::bad_request(format!(
+                "GAEB-Datei nicht lesbar: {error}"
+            )));
+        }
+    };
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -772,6 +1530,90 @@ async fn gaeb_to_pdf(
             .map_err(|_| ApiError::internal())?,
     );
     Ok((headers, Body::from(bytes)).into_response())
+}
+
+#[derive(Debug)]
+struct UsageLimitReached;
+impl std::fmt::Display for UsageLimitReached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("monthly conversion limit reached")
+    }
+}
+impl std::error::Error for UsageLimitReached {}
+
+fn gaeb_conversion_access(
+    state: &AppState,
+    access: Option<&BillingAccess>,
+    submitted_email: &str,
+    consent: bool,
+) -> Result<(String, &'static str, usize, u32), ApiError> {
+    if let Some(access) = access {
+        let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+        let pro: bool = connection
+            .query_row(
+                "SELECT pro_active FROM billing_accounts WHERE email=?1",
+                [&access.email],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|_| ApiError::internal())?
+            .unwrap_or(false);
+        if pro {
+            return Ok((
+                access.email.clone(),
+                "pro",
+                state.paid_max_upload_bytes,
+                100,
+            ));
+        }
+    }
+    if !valid_email(submitted_email) {
+        return Err(ApiError::bad_request(
+            "Bitte eine gültige E-Mail-Adresse angeben.",
+        ));
+    }
+    if !consent {
+        return Err(ApiError::bad_request(
+            "Bitte die Datenschutzerklärung bestätigen und die Konvertierung beauftragen.",
+        ));
+    }
+    Ok((
+        submitted_email.to_owned(),
+        "free",
+        state.max_upload_bytes,
+        3,
+    ))
+}
+
+fn reserve_conversion_usage(
+    db_path: &Path,
+    id: &str,
+    email: &str,
+    direction: &str,
+    tier: &str,
+    limit: u32,
+) -> Result<()> {
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let jobs: u32 = transaction.query_row(
+        "SELECT COUNT(*) FROM jobs WHERE email=?1 AND status!='failed' AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now') AND billing_tier=?2",
+        params![email,tier], |r| r.get(0))?;
+    let direct: u32 = transaction.query_row(
+        "SELECT COUNT(*) FROM conversion_usage WHERE email=?1 AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now') AND billing_tier=?2",
+        params![email,tier], |r| r.get(0))?;
+    if jobs.saturating_add(direct) >= limit {
+        return Err(UsageLimitReached.into());
+    }
+    transaction.execute("INSERT INTO conversion_usage(id,email,direction,billing_tier,created_at) VALUES(?1,?2,?3,?4,?5)",
+        params![id,email,direction,tier,Utc::now().to_rfc3339()])?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn release_conversion_usage(db_path: &Path, id: &str) {
+    if let Ok(connection) = Connection::open(db_path) {
+        let _ = connection.execute("DELETE FROM conversion_usage WHERE id=?1", [id]);
+    }
 }
 
 async fn create_job(
@@ -813,6 +1655,7 @@ async fn create_job(
                 "feature_updates_consent" => {
                     form.feature_updates_consent = value == "true" || value == "on"
                 }
+                "confirm_structure" => form.confirm_structure = value == "true",
                 _ => {}
             }
         }
@@ -831,6 +1674,48 @@ async fn create_job(
     fs::write(&input_path, &form.pdf)
         .await
         .map_err(|_| ApiError::internal())?;
+
+    // Die fachliche Vorprüfung läuft vor jeder Credit-Reservierung. So kostet
+    // ein Scan ohne Textebene oder ein fachfremdes PDF keinen Einzel-Credit.
+    let preflight_path = input_path.clone();
+    let preflight = task::spawn_blocking(move || parse_pdf(&preflight_path))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(|error| {
+            error!(%error, "PDF preflight failed");
+            ApiError::unprocessable(
+                "Die Vorprüfung konnte das PDF nicht als Leistungsverzeichnis lesen. Es wurde kein Credit verwendet. Bitte prüfen Sie die Datei oder laden Sie eine durchsuchbare PDF-Version hoch.",
+            )
+        });
+    let preflight = match preflight {
+        Ok(boq) => boq,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&job_dir).await;
+            return Err(error);
+        }
+    };
+    let detected_positions = count_positions(&preflight.roots);
+    if detected_positions == 0 {
+        let _ = fs::remove_dir_all(&job_dir).await;
+        return Err(ApiError::unprocessable(
+            "Vorprüfung: Keine Ordnungszahlen oder LV-Positionen gefunden. Das PDF ist möglicherweise nur eingescannt, enthält keine Textebene oder ist kein GAEB-artiges Leistungsverzeichnis. Es wurde kein Credit verwendet. Bitte prüfen Sie die Datei oder laden Sie eine OCR-/durchsuchbare PDF hoch.",
+        ));
+    }
+    let detected_sections = count_named_sections(&preflight.roots);
+    if detected_positions <= 10 && detected_sections == 0 && !form.confirm_structure {
+        let ocr = preflight
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("OCR-"));
+        let _ = fs::remove_dir_all(&job_dir).await;
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "Vorprüfung: {detected_positions} Position(en), keine Bereichsbezeichnungen{} erkannt. Es wurde noch kein Credit verwendet. Prüfen Sie das Ergebnis und bestätigen Sie anschließend ausdrücklich die Konvertierung.",
+                if ocr { ", deutsche OCR" } else { "" }
+            ),
+        ));
+    }
 
     let expires_at = Utc::now() + ChronoDuration::hours(state.retention_hours);
     let db_state = state.clone();
@@ -853,7 +1738,8 @@ async fn create_job(
     if !reserved {
         let _ = fs::remove_dir_all(&job_dir).await;
         let message = if has_paid_access {
-            "Kein aktives Pro-Abo oder Einzel-Credit verfügbar.".to_owned()
+            "Kein aktives Pro-Abo, kein Einzel-Credit oder das Pro-Monatskontingent ist erreicht."
+                .to_owned()
         } else {
             "Das kostenlose Monatslimit von 3 Dokumenten ist erreicht.".to_owned()
         };
@@ -863,7 +1749,7 @@ async fn create_job(
     let worker_state = state.clone();
     let worker_id = id.clone();
     tokio::spawn(async move {
-        if let Err(err) = process_job(worker_state.clone(), worker_id.clone()).await {
+        if let Err(err) = process_job(worker_state.clone(), worker_id.clone(), preflight).await {
             error!(job_id = %worker_id, error = %err, "conversion failed");
             let _ = set_job_failed(&worker_state, &worker_id);
         }
@@ -939,7 +1825,11 @@ async fn download(
     Ok((headers, Body::from(bytes)).into_response())
 }
 
-async fn process_job(state: Arc<AppState>, id: String) -> Result<()> {
+async fn process_job(
+    state: Arc<AppState>,
+    id: String,
+    preflight: gaeb_toolkit::BillOfQuantities,
+) -> Result<()> {
     set_job_status(&state, &id, "processing")?;
     let worker_state = state.clone();
     let worker_id = id.clone();
@@ -957,7 +1847,7 @@ async fn process_job(state: Arc<AppState>, id: String) -> Result<()> {
     let processing_report = report.clone();
     let smtp = state.smtp.clone();
     let emailed_with_warnings = task::spawn_blocking(move || -> Result<bool> {
-        let boq = parse_pdf(&processing_input)?;
+        let boq = preflight;
         if record.billing_tier == "free" {
             let positions = count_positions(&boq.roots);
             if positions > 50 {
@@ -1113,6 +2003,32 @@ fn init_database(state: &AppState) -> Result<()> {
            email TEXT NOT NULL,
            expires_at TEXT NOT NULL,
            created_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS checkout_sessions (
+           id TEXT PRIMARY KEY, email TEXT NOT NULL, offer TEXT NOT NULL, status TEXT NOT NULL,
+           access_email_sent_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS purchases (
+           id TEXT PRIMARY KEY, email TEXT NOT NULL, offer TEXT NOT NULL, status TEXT NOT NULL,
+           stripe_customer_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS purchases_email_created ON purchases(email, created_at);
+         CREATE TABLE IF NOT EXISTS credit_ledger (
+           id TEXT PRIMARY KEY, email TEXT NOT NULL, amount INTEGER NOT NULL, reason TEXT NOT NULL,
+           reference_id TEXT NOT NULL, created_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS conversion_usage (
+           id TEXT PRIMARY KEY, email TEXT NOT NULL, direction TEXT NOT NULL,
+           billing_tier TEXT NOT NULL, created_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS reviews (
+           job_id TEXT PRIMARY KEY, email TEXT NOT NULL, rating INTEGER NOT NULL,
+           text TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+           moderated_text TEXT NOT NULL DEFAULT ''
+         );
+         CREATE TABLE IF NOT EXISTS support_cases (
+           id TEXT PRIMARY KEY, email TEXT NOT NULL, subject TEXT NOT NULL, text TEXT NOT NULL,
+           status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
          );",
     )?;
     ensure_job_column(
@@ -1128,12 +2044,31 @@ fn init_database(state: &AppState) -> Result<()> {
     ensure_job_column(&connection, "email_fallback_consent_at", "TEXT")?;
     ensure_job_column(&connection, "feature_updates_consent_at", "TEXT")?;
     ensure_job_column(&connection, "billing_tier", "TEXT NOT NULL DEFAULT 'free'")?;
+    ensure_job_column(&connection, "file_size_bytes", "INTEGER NOT NULL DEFAULT 0")?;
     ensure_table_column(&connection, "stripe_events", "processed_at", "TEXT")?;
     ensure_table_column(
         &connection,
         "billing_accounts",
         "access_email_sent_at",
         "TEXT",
+    )?;
+    ensure_table_column(
+        &connection,
+        "reviews",
+        "status",
+        "TEXT NOT NULL DEFAULT 'pending'",
+    )?;
+    ensure_table_column(
+        &connection,
+        "reviews",
+        "moderated_text",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_table_column(
+        &connection,
+        "billing_access_tokens",
+        "redirect_path",
+        "TEXT NOT NULL DEFAULT '/'",
     )?;
     connection.execute(
         "UPDATE jobs
@@ -1204,30 +2139,68 @@ fn reserve_job(
                     "UPDATE billing_accounts SET single_credits = single_credits - 1, updated_at = ?1 WHERE email = ?2 AND single_credits > 0",
                     params![Utc::now().to_rfc3339(), access.email],
                 )?;
+                transaction.execute(
+                    "INSERT INTO credit_ledger (id,email,amount,reason,reference_id,created_at) VALUES (?1,?2,-1,'conversion',?3,?4)",
+                    params![format!("conversion:{id}"), access.email, id, Utc::now().to_rfc3339()],
+                )?;
                 "single"
             }
             _ => return Ok(false),
         }
     } else {
-        let used_this_month: u32 = transaction.query_row(
+        let jobs_this_month: u32 = transaction.query_row(
             "SELECT COUNT(*) FROM jobs
              WHERE email = ?1 AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')
-               AND billing_tier = 'free'",
+               AND billing_tier = 'free' AND status != 'failed'",
             [&form.email],
             |row| row.get(0),
         )?;
-        if used_this_month >= 3 {
+        let direct_this_month: u32 = transaction.query_row(
+            "SELECT COUNT(*) FROM conversion_usage WHERE email=?1 AND billing_tier='free'
+             AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')",
+            [&form.email],
+            |row| row.get(0),
+        )?;
+        if jobs_this_month.saturating_add(direct_this_month) >= 3 {
             return Ok(false);
         }
         "free"
     };
+    if billing_tier == "pro" {
+        let jobs_this_month: u32 = transaction.query_row(
+            "SELECT COUNT(*) FROM jobs WHERE email=?1 AND billing_tier='pro' AND status!='failed'
+             AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')",
+            [&form.email],
+            |row| row.get(0),
+        )?;
+        let direct_this_month: u32 = transaction.query_row(
+            "SELECT COUNT(*) FROM conversion_usage WHERE email=?1 AND billing_tier='pro'
+             AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')",
+            [&form.email],
+            |row| row.get(0),
+        )?;
+        if jobs_this_month.saturating_add(direct_this_month) >= 100 {
+            return Ok(false);
+        }
+        let stored: i64 = transaction.query_row(
+            "SELECT COALESCE(SUM(file_size_bytes),0) FROM jobs WHERE email=?1 AND billing_tier='pro' AND status!='failed' AND expires_at>?2",
+            params![form.email, Utc::now().to_rfc3339()], |r| r.get(0))?;
+        if stored.saturating_add(form.pdf.len() as i64) > PRO_STORAGE_BYTES {
+            return Ok(false);
+        }
+    }
     let now = Utc::now().to_rfc3339();
+    let expires_at = match billing_tier {
+        "pro" => (Utc::now() + ChronoDuration::days(3650)).to_rfc3339(),
+        "single" => (Utc::now() + ChronoDuration::days(7)).to_rfc3339(),
+        _ => expires_at.to_owned(),
+    };
     transaction.execute(
         "INSERT INTO jobs
          (id, token, email, contact_name, company, phone, filename, status,
           email_fallback_consent, feature_updates_consent,
-          email_fallback_consent_at, feature_updates_consent_at, created_at, expires_at, billing_tier)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+          email_fallback_consent_at, feature_updates_consent_at, created_at, expires_at, billing_tier, file_size_bytes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             id,
             token,
@@ -1243,6 +2216,7 @@ fn reserve_job(
             now,
             expires_at,
             billing_tier,
+            form.pdf.len() as i64,
         ],
     )?;
     if form.feature_updates_consent {
@@ -1358,6 +2332,10 @@ fn set_job_failed(state: &AppState, id: &str) -> Result<()> {
             "UPDATE billing_accounts SET single_credits = single_credits + 1, updated_at = ?1 WHERE email = ?2",
             params![Utc::now().to_rfc3339(), email],
         )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO credit_ledger (id,email,amount,reason,reference_id,created_at) VALUES (?1,?2,1,'refund',?3,?4)",
+            params![format!("refund:{id}"), email, id, Utc::now().to_rfc3339()],
+        )?;
     }
     transaction.commit()?;
     Ok(())
@@ -1367,6 +2345,15 @@ fn count_positions(nodes: &[gaeb_toolkit::model::Node]) -> usize {
     nodes
         .iter()
         .map(|node| node.positions.len() + count_positions(&node.children))
+        .sum()
+}
+
+fn count_named_sections(nodes: &[gaeb_toolkit::model::Node]) -> usize {
+    nodes
+        .iter()
+        .map(|node| {
+            usize::from(!node.title.trim().is_empty()) + count_named_sections(&node.children)
+        })
         .sum()
 }
 
@@ -1487,20 +2474,21 @@ fn issue_billing_access_email(state: &AppState, notice: &PurchaseNotice) -> Resu
     let expires_at = (Utc::now() + ChronoDuration::hours(24)).to_rfc3339();
     let connection = Connection::open(&state.db_path)?;
     connection.execute(
-        "INSERT INTO billing_access_tokens (token_hash, email, expires_at, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO billing_access_tokens (token_hash, email, expires_at, created_at, redirect_path)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             token_hash,
             notice.email,
             expires_at,
-            Utc::now().to_rfc3339()
+            Utc::now().to_rfc3339(),
+            if notice.offer == "account" { "/konto.html" } else { "/" }
         ],
     )?;
     let link = format!("{}/billing/access/{}", stripe.public_base_url, raw_token);
-    let product = if notice.offer == "pro" {
-        "GAEB Pro"
-    } else {
-        "eine Einzelkonvertierung"
+    let product = match notice.offer.as_str() {
+        "pro" => "GAEB Pro",
+        "single" => "eine Einzelkonvertierung",
+        _ => "Ihr GAEB-Konto",
     };
     let body = format!(
         "Guten Tag,\n\nIhre Zahlung für {product} wurde bestätigt.\n\n\
@@ -1519,7 +2507,39 @@ fn issue_billing_access_email(state: &AppState, notice: &PurchaseNotice) -> Resu
         "UPDATE billing_accounts SET access_email_sent_at = ?1 WHERE email = ?2",
         params![Utc::now().to_rfc3339(), notice.email],
     )?;
+    connection.execute(
+        "UPDATE checkout_sessions SET access_email_sent_at = ?1, updated_at = ?1 WHERE email = ?2 AND status = 'paid'",
+        params![Utc::now().to_rfc3339(), notice.email],
+    )?;
     Ok(())
+}
+
+fn checkout_notice_for_resend(db_path: &Path, id: &str) -> Result<Option<PurchaseNotice>> {
+    let connection = Connection::open(db_path)?;
+    let row: Option<(String,String,Option<String>)> = connection.query_row(
+        "SELECT email,offer,access_email_sent_at FROM checkout_sessions WHERE id=?1 AND status='paid'",
+        [id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    Ok(row.and_then(|(email, offer, sent)| {
+        let allowed = sent
+            .as_deref()
+            .and_then(parse_time)
+            .map_or(true, |at| Utc::now() - at >= ChronoDuration::minutes(2));
+        allowed.then_some(PurchaseNotice { email, offer })
+    }))
+}
+
+fn parse_time(value: &str) -> Option<chrono::DateTime<Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|v| v.with_timezone(&Utc))
+}
+
+fn mask_email(email: &str) -> String {
+    let Some((local, domain)) = email.split_once('@') else {
+        return String::new();
+    };
+    let first = local.chars().next().unwrap_or('*');
+    format!("{first}***@{domain}")
 }
 
 fn smtp_transport(smtp: &SmtpConfig) -> Result<SmtpTransport> {
@@ -1538,13 +2558,13 @@ fn smtp_transport(smtp: &SmtpConfig) -> Result<SmtpTransport> {
     Ok(builder.build())
 }
 
-fn activate_access_token(db_path: &Path, token_hash: &str, session_hash: &str) -> Result<()> {
+fn activate_access_token(db_path: &Path, token_hash: &str, session_hash: &str) -> Result<String> {
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let email: String = transaction.query_row(
-        "SELECT email FROM billing_access_tokens WHERE token_hash = ?1 AND expires_at > ?2",
+    let (email, redirect_path): (String,String) = transaction.query_row(
+        "SELECT email, redirect_path FROM billing_access_tokens WHERE token_hash = ?1 AND expires_at > ?2",
         params![token_hash, Utc::now().to_rfc3339()],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?,row.get(1)?)),
     )?;
     transaction.execute(
         "INSERT INTO billing_sessions (session_hash, email, expires_at, created_at)
@@ -1561,7 +2581,7 @@ fn activate_access_token(db_path: &Path, token_hash: &str, session_hash: &str) -
         [token_hash],
     )?;
     transaction.commit()?;
-    Ok(())
+    Ok(redirect_path)
 }
 
 fn billing_access_from_headers(
@@ -1612,6 +2632,10 @@ async fn cleanup_expired_jobs(state: &AppState) -> Result<()> {
             rows
         };
         connection.execute("DELETE FROM jobs WHERE expires_at <= ?1", [&now])?;
+        connection.execute(
+            "DELETE FROM conversion_usage WHERE created_at <= ?1",
+            [(Utc::now() - ChronoDuration::days(400)).to_rfc3339()],
+        )?;
         Ok(ids)
     })
     .await??;
@@ -1678,6 +2702,24 @@ fn env_i64(name: &str, default: i64) -> i64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+fn env_u32(name: &str, default: u32) -> u32 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn offer_config() -> OfferConfig {
+    OfferConfig {
+        single_net_cents: env_u32("SINGLE_NET_CENTS", 990),
+        pro_net_cents: env_u32("PRO_NET_CENTS", 1900),
+        banner: env::var("OFFER_BANNER_TEXT")
+            .ok()
+            .map(|v| v.trim().chars().take(180).collect::<String>())
+            .filter(|v| !v.is_empty()),
+    }
 }
 
 fn valid_email(value: &str) -> bool {
@@ -1812,6 +2854,10 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, message)
     }
 
+    fn unprocessable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, message)
+    }
+
     fn internal() -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1851,8 +2897,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        extract_imprint_sections, init_database, output_filename, record_and_apply_stripe_event,
-        verify_stripe_signature, AppState,
+        extract_imprint_sections, init_database, mask_profanity, output_filename,
+        record_and_apply_stripe_event, reserve_conversion_usage, verify_stripe_signature, AppState,
     };
 
     #[test]
@@ -1875,6 +2921,14 @@ mod tests {
             .lines
             .iter()
             .any(|line| line.contains("Nicht übernehmen"))));
+    }
+
+    #[test]
+    fn review_moderation_masks_profanity_without_changing_other_words() {
+        assert_eq!(
+            mask_profanity("Das ist scheiße, aber lösbar."),
+            "Das ist *******, aber lösbar."
+        );
     }
 
     #[test]
@@ -1941,6 +2995,12 @@ mod tests {
             imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tracking: Default::default(),
             stripe: None,
+            offer: super::OfferConfig {
+                single_net_cents: 990,
+                pro_net_cents: 1900,
+                banner: None,
+            },
+            admin_token_hash: None,
         });
         init_database(&state).unwrap();
 
@@ -1973,6 +3033,12 @@ mod tests {
             imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tracking: Default::default(),
             stripe: None,
+            offer: super::OfferConfig {
+                single_net_cents: 990,
+                pro_net_cents: 1900,
+                banner: None,
+            },
+            admin_token_hash: None,
         });
         init_database(&state).unwrap();
         let payload = r#"{
@@ -2012,5 +3078,66 @@ mod tests {
         assert_eq!(first.unwrap().email, "buyer@example.de");
         assert!(repeated.is_none());
         assert_eq!(credits, 1);
+    }
+
+    #[test]
+    fn free_monthly_limit_counts_both_conversion_directions() {
+        let directory = tempdir().unwrap();
+        let db_path = directory.path().join("gaeb-web.sqlite3");
+        let state = Arc::new(AppState {
+            data_dir: directory.path().to_owned(),
+            db_path: db_path.clone(),
+            max_upload_bytes: 2 * 1024 * 1024,
+            paid_max_upload_bytes: 25 * 1024 * 1024,
+            retention_hours: 24,
+            diagnostic_retention_days: 30,
+            smtp: None,
+            http_client: reqwest::Client::new(),
+            imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tracking: Default::default(),
+            stripe: None,
+            offer: super::OfferConfig {
+                single_net_cents: 990,
+                pro_net_cents: 1900,
+                banner: None,
+            },
+            admin_token_hash: None,
+        });
+        init_database(&state).unwrap();
+        let connection = Connection::open(&db_path).unwrap();
+        let now = Utc::now().to_rfc3339();
+        connection.execute(
+            "INSERT INTO jobs(id,token,email,contact_name,company,phone,filename,status,created_at,expires_at,billing_tier)
+             VALUES('job-one','token','mix@example.de','Test','','','test.pdf','ready',?1,?2,'free')",
+            [&now, &now],
+        ).unwrap();
+        drop(connection);
+        reserve_conversion_usage(
+            &db_path,
+            "usage-one",
+            "mix@example.de",
+            "gaeb_to_pdf",
+            "free",
+            3,
+        )
+        .unwrap();
+        reserve_conversion_usage(
+            &db_path,
+            "usage-two",
+            "mix@example.de",
+            "gaeb_to_pdf",
+            "free",
+            3,
+        )
+        .unwrap();
+        assert!(reserve_conversion_usage(
+            &db_path,
+            "usage-three",
+            "mix@example.de",
+            "gaeb_to_pdf",
+            "free",
+            3
+        )
+        .is_err());
     }
 }

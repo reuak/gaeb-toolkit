@@ -10,6 +10,7 @@ const jobTitle = document.querySelector("#job-title");
 const jobMessage = document.querySelector("#job-message");
 const progressBar = document.querySelector("#progress-bar");
 const downloadButton = document.querySelector("#download-button");
+const reviewButton = document.querySelector("#review-button");
 const newJobButton = document.querySelector("#new-job-button");
 let pdfUploadLimit = 2 * 1024 * 1024;
 
@@ -115,6 +116,8 @@ async function initializeBilling() {
 
 initializeBilling();
 
+async function loadReviews(){try{const r=await fetch("/api/reviews/public"),reviews=await r.json();if(!r.ok||!reviews.length)return;const section=document.querySelector("#bewertungen"),grid=document.querySelector("#public-reviews");grid.replaceChildren(...reviews.map(review=>{const article=document.createElement("article");article.className="review-card";const stars=document.createElement("strong");stars.textContent=`${"★".repeat(review.rating)}${"☆".repeat(5-review.rating)}`;const text=document.createElement("p");text.textContent=review.text||"Bewertung ohne Kommentar";const date=document.createElement("small");date.textContent=`Verifizierte Konvertierung · ${new Date(review.created_at).toLocaleDateString("de-DE")}`;article.append(stars,text,date);return article;}));section.hidden=false;}catch(_){}}loadReviews();
+
 function showFile(file) {
   if (!file) return;
   fileTitle.textContent = file.name;
@@ -210,6 +213,7 @@ async function pollJob(id, token) {
       progressBar.style.width = "100%";
       downloadButton.href = data.download_url;
       downloadButton.hidden = false;
+      if (document.body.classList.contains("billing-active")) { reviewButton.href = `/review.html?job_id=${encodeURIComponent(id)}`; reviewButton.hidden = false; }
       newJobButton.hidden = false;
       return;
     }
