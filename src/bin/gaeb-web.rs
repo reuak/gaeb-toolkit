@@ -19,6 +19,7 @@ use axum::{
 use chrono::{Duration as ChronoDuration, Utc};
 use gaeb_toolkit::{
     apply_provisional_flags, inject_pdf_pngs, parse_pdf, read_gaeb_xml, write_gaeb_pdf, write_x83,
+    write_x84,
 };
 use hmac::{Hmac, Mac};
 use lettre::{
@@ -119,7 +120,15 @@ struct JobStatusResponse {
     filename: String,
     error: Option<String>,
     download_url: Option<String>,
+    download_options: Vec<DownloadOption>,
     expires_at: String,
+}
+
+#[derive(Serialize)]
+struct DownloadOption {
+    format: &'static str,
+    label: &'static str,
+    url: String,
 }
 
 #[derive(Serialize)]
@@ -218,6 +227,27 @@ struct EmailRequest {
 }
 
 #[derive(Deserialize)]
+struct AccountRegistrationRequest {
+    email: String,
+    name: String,
+    company: String,
+    street: String,
+    postal_code: String,
+    city: String,
+    country: String,
+}
+
+#[derive(Serialize)]
+struct BillingAddressResponse {
+    name: String,
+    company: String,
+    street: String,
+    postal_code: String,
+    city: String,
+    country: String,
+}
+
+#[derive(Deserialize)]
 struct CheckoutSessionRequest {
     session_id: String,
 }
@@ -235,6 +265,7 @@ struct CheckoutStatusResponse {
 struct AccountResponse {
     email: String,
     plan: String,
+    billing_address: BillingAddressResponse,
     single_credits: i64,
     storage_used_bytes: i64,
     storage_limit_bytes: i64,
@@ -364,6 +395,8 @@ async fn main() -> Result<()> {
         .route("/api/billing/checkout-status", get(checkout_status))
         .route("/api/billing/resend-access", post(resend_access))
         .route("/api/account/login", post(request_account_login))
+        .route("/api/account/register", post(register_account))
+        .route("/api/account/address", post(update_account_address))
         .route("/api/account/logout", post(account_logout))
         .route("/api/account", get(account_overview))
         .route("/api/account/portal", post(create_customer_portal))
@@ -385,6 +418,7 @@ async fn main() -> Result<()> {
         .route("/billing/access/{token}", get(activate_billing_access))
         .route("/api/jobs/{id}", get(job_status))
         .route("/download/{id}/{token}", get(download))
+        .route("/download/{id}/{token}/{format}", get(download_format))
         .fallback_service(ServeDir::new("web").append_index_html_on_directories(true))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("permissions-policy"),
@@ -459,9 +493,19 @@ async fn billing_status(
         .unwrap_or((false, 0));
     Ok(Json(BillingStatusResponse {
         signed_in: true,
-        plan: if pro_active { "pro" } else { "single" },
+        plan: if pro_active {
+            "pro"
+        } else if single_credits > 0 {
+            "single"
+        } else {
+            "free"
+        },
         single_credits,
-        max_upload_bytes: state.paid_max_upload_bytes,
+        max_upload_bytes: if pro_active || single_credits > 0 {
+            state.paid_max_upload_bytes
+        } else {
+            state.max_upload_bytes
+        },
     }))
 }
 
@@ -647,6 +691,95 @@ async fn request_account_login(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn validate_account_registration(request: &AccountRegistrationRequest) -> Result<String, ApiError> {
+    let email = request.email.trim().to_lowercase();
+    if !valid_email(&email) {
+        return Err(ApiError::bad_request(
+            "Bitte eine gültige E-Mail-Adresse angeben.",
+        ));
+    }
+    if request.name.trim().chars().count() < 2
+        || request.street.trim().chars().count() < 3
+        || request.postal_code.trim().chars().count() < 3
+        || request.city.trim().chars().count() < 2
+        || request.country.trim().chars().count() < 2
+    {
+        return Err(ApiError::bad_request(
+            "Bitte die vollständige Rechnungsanschrift angeben.",
+        ));
+    }
+    Ok(email)
+}
+
+fn save_account_address(
+    connection: &Connection,
+    email: &str,
+    request: &AccountRegistrationRequest,
+) -> Result<()> {
+    connection.execute(
+        "INSERT INTO billing_accounts
+         (email, updated_at, billing_name, billing_company, billing_street, billing_postal_code, billing_city, billing_country)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(email) DO UPDATE SET
+           billing_name=excluded.billing_name, billing_company=excluded.billing_company,
+           billing_street=excluded.billing_street, billing_postal_code=excluded.billing_postal_code,
+           billing_city=excluded.billing_city, billing_country=excluded.billing_country,
+           updated_at=excluded.updated_at",
+        params![
+            email,
+            Utc::now().to_rfc3339(),
+            request.name.trim(),
+            request.company.trim(),
+            request.street.trim(),
+            request.postal_code.trim(),
+            request.city.trim(),
+            request.country.trim()
+        ],
+    )?;
+    Ok(())
+}
+
+async fn register_account(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<AccountRegistrationRequest>,
+) -> Result<StatusCode, ApiError> {
+    let email = validate_account_registration(&request)?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let exists = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM billing_accounts WHERE email=?1)",
+            [&email],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| ApiError::internal())?;
+    if !exists {
+        save_account_address(&connection, &email, &request).map_err(|_| ApiError::internal())?;
+    }
+    issue_billing_access_email(
+        &state,
+        &PurchaseNotice {
+            email,
+            offer: "account".into(),
+        },
+    )
+    .map_err(|_| ApiError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_account_address(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<AccountRegistrationRequest>,
+) -> Result<StatusCode, ApiError> {
+    let access = billing_access_from_headers(&state, &headers)
+        .map_err(|_| ApiError::internal())?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Bitte zuerst anmelden."))?;
+    validate_account_registration(&request)?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    save_account_address(&connection, &access.email, &request).map_err(|_| ApiError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn account_logout() -> Response {
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
@@ -671,11 +804,26 @@ async fn account_overview(
             )
         })?;
     let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
-    let (pro, credits): (bool, i64) = connection
+    let (pro, credits, billing_address): (bool, i64, BillingAddressResponse) = connection
         .query_row(
-            "SELECT pro_active, single_credits FROM billing_accounts WHERE email = ?1",
+            "SELECT pro_active, single_credits, billing_name, billing_company, billing_street,
+                    billing_postal_code, billing_city, billing_country
+             FROM billing_accounts WHERE email = ?1",
             [&access.email],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    BillingAddressResponse {
+                        name: r.get(2)?,
+                        company: r.get(3)?,
+                        street: r.get(4)?,
+                        postal_code: r.get(5)?,
+                        city: r.get(6)?,
+                        country: r.get(7)?,
+                    },
+                ))
+            },
         )
         .map_err(|_| ApiError::internal())?;
     let purchases = {
@@ -734,7 +882,15 @@ async fn account_overview(
         params![access.email, usage_tier], |r| r.get(0)).map_err(|_| ApiError::internal())?;
     Ok(Json(AccountResponse {
         email: access.email,
-        plan: if pro { "pro" } else { "single" }.into(),
+        plan: if pro {
+            "pro"
+        } else if credits > 0 {
+            "single"
+        } else {
+            "free"
+        }
+        .into(),
+        billing_address,
         single_credits: credits,
         storage_used_bytes,
         storage_limit_bytes: if pro { PRO_STORAGE_BYTES } else { 0 },
@@ -1782,12 +1938,33 @@ async fn job_status(
         .ok_or_else(|| ApiError::not_found("Auftrag nicht gefunden."))?;
     let download_url =
         (record.status == "ready").then(|| format!("/download/{}/{}", record.id, record.token));
+    let mut download_options = Vec::new();
+    if record.status == "ready" {
+        download_options.push(DownloadOption {
+            format: "x83",
+            label: "X83 – Ausschreibung ohne Preise",
+            url: format!("/download/{}/{}/x83", record.id, record.token),
+        });
+        let x84 = state
+            .data_dir
+            .join("jobs")
+            .join(&record.id)
+            .join("output.x84");
+        if fs::try_exists(x84).await.unwrap_or(false) {
+            download_options.push(DownloadOption {
+                format: "x84",
+                label: "X84 – Angebot mit Preisen",
+                url: format!("/download/{}/{}/x84", record.id, record.token),
+            });
+        }
+    }
     Ok(Json(JobStatusResponse {
         id: record.id,
         status: record.status,
         filename: record.filename,
         error: record.error,
         download_url,
+        download_options,
         expires_at: record.expires_at,
     }))
 }
@@ -1825,6 +2002,44 @@ async fn download(
     Ok((headers, Body::from(bytes)).into_response())
 }
 
+async fn download_format(
+    State(state): State<Arc<AppState>>,
+    AxumPath((id, token, format)): AxumPath<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let db_state = state.clone();
+    let record = task::spawn_blocking(move || load_job(&db_state, &id, &token))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(|_| ApiError::internal())?
+        .filter(|job| job.status == "ready")
+        .ok_or_else(|| ApiError::not_found("Download nicht gefunden oder abgelaufen."))?;
+    let extension = match format.to_ascii_lowercase().as_str() {
+        "x83" => "x83",
+        "x84" => "x84",
+        _ => return Err(ApiError::not_found("Downloadformat nicht gefunden.")),
+    };
+    let path = state
+        .data_dir
+        .join("jobs")
+        .join(&record.id)
+        .join(format!("output.{extension}"));
+    let bytes = fs::read(path)
+        .await
+        .map_err(|_| ApiError::not_found("Download nicht gefunden oder abgelaufen."))?;
+    let filename = output_filename_for(&record.filename, extension);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/xml; charset=utf-8"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            .map_err(|_| ApiError::internal())?,
+    );
+    Ok((headers, Body::from(bytes)).into_response())
+}
+
 async fn process_job(
     state: Arc<AppState>,
     id: String,
@@ -1837,6 +2052,7 @@ async fn process_job(
         task::spawn_blocking(move || load_job_for_worker(&worker_state, &worker_id)).await??;
     let input = state.data_dir.join("jobs").join(&id).join("input.pdf");
     let output = state.data_dir.join("jobs").join(&id).join("output.x83");
+    let priced_output = state.data_dir.join("jobs").join(&id).join("output.x84");
     let report = state
         .data_dir
         .join("jobs")
@@ -1844,10 +2060,12 @@ async fn process_job(
         .join("fehlerprotokoll.txt");
     let processing_input = input.clone();
     let processing_output = output.clone();
+    let processing_priced_output = priced_output.clone();
     let processing_report = report.clone();
     let smtp = state.smtp.clone();
     let emailed_with_warnings = task::spawn_blocking(move || -> Result<bool> {
         let boq = preflight;
+        let includes_prices = has_prices(&boq.roots);
         if record.billing_tier == "free" {
             let positions = count_positions(&boq.roots);
             if positions > 50 {
@@ -1860,6 +2078,11 @@ async fn process_job(
             Ok(()) => {
                 inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
                 apply_provisional_flags(&processing_output, &boq)?;
+                if includes_prices {
+                    write_x84(&boq, &processing_priced_output, false)?;
+                    inject_pdf_pngs(&processing_input, &processing_priced_output, &boq)?;
+                    apply_provisional_flags(&processing_priced_output, &boq)?;
+                }
                 Ok(false)
             }
             Err(error) if record.email_fallback_consent => {
@@ -2052,6 +2275,16 @@ fn init_database(state: &AppState) -> Result<()> {
         "access_email_sent_at",
         "TEXT",
     )?;
+    for (column, definition) in [
+        ("billing_name", "TEXT NOT NULL DEFAULT ''"),
+        ("billing_company", "TEXT NOT NULL DEFAULT ''"),
+        ("billing_street", "TEXT NOT NULL DEFAULT ''"),
+        ("billing_postal_code", "TEXT NOT NULL DEFAULT ''"),
+        ("billing_city", "TEXT NOT NULL DEFAULT ''"),
+        ("billing_country", "TEXT NOT NULL DEFAULT 'Deutschland'"),
+    ] {
+        ensure_table_column(&connection, "billing_accounts", column, definition)?;
+    }
     ensure_table_column(
         &connection,
         "reviews",
@@ -2348,6 +2581,15 @@ fn count_positions(nodes: &[gaeb_toolkit::model::Node]) -> usize {
         .sum()
 }
 
+fn has_prices(nodes: &[gaeb_toolkit::model::Node]) -> bool {
+    nodes.iter().any(|node| {
+        node.positions
+            .iter()
+            .any(|position| position.unit_price.is_some() || position.total_price.is_some())
+            || has_prices(&node.children)
+    })
+}
+
 fn count_named_sections(nodes: &[gaeb_toolkit::model::Node]) -> usize {
     nodes
         .iter()
@@ -2490,8 +2732,13 @@ fn issue_billing_access_email(state: &AppState, notice: &PurchaseNotice) -> Resu
         "single" => "eine Einzelkonvertierung",
         _ => "Ihr GAEB-Konto",
     };
+    let introduction = if notice.offer == "account" {
+        "Ihr Kundenkonto wurde angefordert.".to_owned()
+    } else {
+        format!("Ihre Zahlung für {product} wurde bestätigt.")
+    };
     let body = format!(
-        "Guten Tag,\n\nIhre Zahlung für {product} wurde bestätigt.\n\n\
+        "Guten Tag,\n\n{introduction}\n\n\
          Öffnen Sie innerhalb von 24 Stunden diesen persönlichen Zugangslink:\n{link}\n\n\
          Anschließend ist Ihr gekauftes Kontingent in diesem Browser freigeschaltet.\n\n\
          Falls Sie den Kauf nicht durchgeführt haben, ignorieren Sie diese Nachricht.\n"
@@ -2683,11 +2930,15 @@ fn safe_filename(value: &str) -> String {
 }
 
 fn output_filename(input: &str) -> String {
+    output_filename_for(input, "x83")
+}
+
+fn output_filename_for(input: &str, extension: &str) -> String {
     let stem = Path::new(input)
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("leistungsverzeichnis");
-    format!("{}.x83", safe_filename(stem))
+    format!("{}.{}", safe_filename(stem), extension)
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
