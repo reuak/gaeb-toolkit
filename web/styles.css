@@ -148,6 +148,86 @@ h1 {
   font-weight: 850;
 }
 
+.billing-banner {
+  margin: -4px 0 20px;
+  padding: 14px 15px;
+  border: 1px solid rgba(198, 91, 37, 0.26);
+  border-radius: 15px;
+  background: linear-gradient(105deg, #fff2e7, #f8f8df);
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  gap: 11px;
+  align-items: center;
+}
+.billing-check {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--orange, #c65b25);
+  color: white;
+  font-weight: 900;
+  box-shadow: 0 7px 18px rgba(198, 91, 37, 0.25);
+}
+.billing-banner strong, .billing-banner span { display: block; }
+.billing-banner strong { margin-bottom: 3px; font-size: 13px; }
+.billing-banner div span { color: #6c6259; font-size: 11px; line-height: 1.4; }
+.billing-credit {
+  padding: 7px 9px;
+  border: 1px solid rgba(158, 62, 24, 0.18);
+  border-radius: 8px;
+  background: white;
+  color: #9e3e18;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.07em;
+  white-space: nowrap;
+}
+
+body.billing-active {
+  background:
+    radial-gradient(circle at 8% 4%, rgba(201, 232, 108, 0.22), transparent 25rem),
+    radial-gradient(circle at 91% 17%, rgba(235, 139, 67, 0.15), transparent 30rem),
+    var(--paper);
+}
+body.billing-active .converter-card {
+  border-color: rgba(198, 91, 37, 0.34);
+  background: linear-gradient(155deg, #fffdf8 60%, #fff7ee);
+  box-shadow: 0 28px 80px rgba(111, 60, 31, 0.18);
+}
+body.billing-active .converter-card::before {
+  height: 4px;
+  background: linear-gradient(90deg, #b8481d, #ed8d3d 65%, var(--lime));
+}
+body.billing-active #converter-kicker { color: #a9421c; }
+body.billing-active .converter-card .format-badge {
+  background: #f7dfcc;
+  color: #9e3e18;
+}
+body.billing-active .converter-card .file-drop {
+  border-color: rgba(198, 91, 37, 0.46);
+  background: rgba(255, 250, 244, 0.7);
+}
+body.billing-active .converter-card .file-drop:hover,
+body.billing-active .converter-card .file-drop.is-dragging {
+  border-color: #c65b25;
+  background: #fff4e9;
+}
+body.billing-active .converter-card .file-icon { background: #f7dfcc; color: #9e3e18; }
+body.billing-active .converter-card .primary-button { background: #c65b25; }
+body.billing-active .converter-card .primary-button:hover { background: #9e3e18; }
+body.billing-active .trust-row span {
+  border-color: rgba(198, 91, 37, 0.22);
+  background: rgba(255, 246, 237, 0.84);
+  color: #87401f;
+}
+body.billing-active .trust-row span:first-child {
+  border-color: #c65b25;
+  background: #c65b25;
+  color: white;
+}
+
 .file-drop {
   min-height: 138px;
   padding: 24px;
@@ -375,6 +455,24 @@ h1 {
 }
 
 .price-card.featured { border-color: var(--green); }
+.price-card.is-current {
+  position: relative;
+  border-color: #ef9a55;
+  box-shadow: 0 0 0 2px rgba(239, 154, 85, 0.14);
+}
+.price-card.is-current::before {
+  position: absolute;
+  top: -11px;
+  right: 16px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #c65b25;
+  color: white;
+  content: "AKTIV";
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
 .price-card h3 { margin: 6px 0 12px; font-size: 1.8rem; }
 .price-card h3 small { font: inherit; font-size: 0.78rem; color: var(--muted); }
 .checkout-form { display: grid; gap: 10px; margin-top: 18px; }
@@ -385,6 +483,8 @@ h1 {
 
 @media (max-width: 760px) {
   .pricing-grid { grid-template-columns: 1fr; }
+  .billing-banner { grid-template-columns: 34px 1fr; }
+  .billing-credit { grid-column: 2; width: fit-content; }
 }
 .paid-preview > div { max-width: 690px; }
 .paid-preview .eyebrow { color: var(--lime); }

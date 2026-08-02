@@ -10,8 +10,8 @@
     <meta name="theme-color" content="#f4f2e9" />
     <title>LV Konverter · PDF und GAEB lesbar austauschen</title>
     <link rel="icon" type="image/png" href="/assets/gaeb-konverter-icon.png?v=2" />
-    <link rel="stylesheet" href="/styles.css" />
-    <script src="/app.js" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=6" />
+    <script src="/app.js?v=6" defer></script>
     <script src="/consent.js" defer></script>
   </head>
   <body>
@@ -34,20 +34,29 @@
             GAEB-Datei anschließend zum Download bereit.
           </p>
           <div class="trust-row" aria-label="Leistungsmerkmale">
-            <span>Bis 2 MB kostenlos</span>
-            <span>3 Dokumente pro Monat</span>
-            <span>Bis 50 Positionen</span>
-            <span>Löschung nach 24 Stunden</span>
+            <span id="trust-size">Bis 2 MB kostenlos</span>
+            <span id="trust-volume">3 Dokumente pro Monat</span>
+            <span id="trust-positions">Bis 50 Positionen</span>
+            <span id="trust-retention">Löschung nach 24 Stunden</span>
           </div>
         </div>
 
         <section class="converter-card" aria-labelledby="converter-title">
           <div class="card-heading">
             <div>
-              <p class="step-label">Kostenlose Konvertierung</p>
+              <p class="step-label" id="converter-kicker">Kostenlose Konvertierung</p>
               <h2 id="converter-title">LV jetzt umwandeln</h2>
             </div>
             <span class="format-badge">X83</span>
+          </div>
+
+          <div class="billing-banner" id="billing-banner" hidden>
+            <span class="billing-check" aria-hidden="true">✓</span>
+            <div>
+              <strong id="billing-banner-title">Kauf erfolgreich aktiviert</strong>
+              <span id="billing-banner-copy">Ihr erweitertes Kontingent ist einsatzbereit.</span>
+            </div>
+            <span class="billing-credit" id="billing-credit"></span>
           </div>
 
           <form id="convert-form" enctype="multipart/form-data">

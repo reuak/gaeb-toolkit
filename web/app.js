@@ -47,6 +47,41 @@ async function loadImprint() {
 
 loadImprint();
 
+function applyPaidAppearance(status) {
+  const isPro = status.plan === "pro";
+  const credits = status.single_credits;
+  document.body.classList.add("billing-active", isPro ? "billing-pro" : "billing-single");
+  document.querySelector("#billing-banner").hidden = false;
+  document.querySelector("#converter-kicker").textContent = isPro
+    ? "GAEB Pro · Zugang aktiv"
+    : "Bezahlte Konvertierung · Zugang aktiv";
+  document.querySelector("#converter-title").textContent = isPro
+    ? "Pro-Konvertierung starten"
+    : "Gekauftes LV umwandeln";
+  document.querySelector("#billing-banner-title").textContent = isPro
+    ? "Ihr Pro-Zugang ist aktiv"
+    : "Ihr Kauf ist erfolgreich aktiviert";
+  document.querySelector("#billing-banner-copy").textContent = isPro
+    ? "Erweiterte Uploads und Ihr Monatskontingent sind freigeschaltet."
+    : "Ein Credit wird erst nach erfolgreicher Konvertierung verbraucht.";
+  document.querySelector("#billing-credit").textContent = isPro
+    ? "PRO"
+    : `${credits} CREDIT${credits === 1 ? "" : "S"}`;
+  document.querySelector("#trust-size").textContent = "Bis 25 MB freigeschaltet";
+  document.querySelector("#trust-volume").textContent = isPro
+    ? "100 Dokumente pro Monat"
+    : `${credits} bezahlte Konvertierung${credits === 1 ? "" : "en"}`;
+  document.querySelector("#trust-positions").textContent = "Erweiterter Positionsumfang";
+  document.querySelector("#trust-retention").textContent = isPro
+    ? "2 GB Dokumentenspeicher"
+    : "Download für 7 Tage";
+  document.querySelector("#convert-form .primary-button span").textContent = isPro
+    ? "Pro-Konvertierung starten"
+    : "Credit einsetzen und konvertieren";
+  const currentCard = document.querySelector(isPro ? ".price-card.featured" : ".price-card:not(.featured)");
+  if (currentCard) currentCard.classList.add("is-current");
+}
+
 async function initializeBilling() {
   const forms = document.querySelectorAll(".checkout-form");
   if (!forms.length) return;
@@ -60,6 +95,7 @@ async function initializeBilling() {
         ? "Pro ist aktiv"
         : `${status.single_credits} Einzelkonvertierung${status.single_credits === 1 ? "" : "en"} verfügbar`;
       document.querySelector("#preise .eyebrow").textContent = label;
+      applyPaidAppearance(status);
     }
     const response = await fetch("/api/billing/config");
     const config = await response.json();
