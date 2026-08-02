@@ -11,41 +11,10 @@ const jobMessage = document.querySelector("#job-message");
 const progressBar = document.querySelector("#progress-bar");
 const downloadButton = document.querySelector("#download-button");
 const newJobButton = document.querySelector("#new-job-button");
-const gaebReaderForm = document.querySelector("#gaeb-reader-form");
-const gaebInput = document.querySelector("#gaeb");
-const gaebFileTitle = document.querySelector("#gaeb-file-title");
-const gaebFileMeta = document.querySelector("#gaeb-file-meta");
 let pdfUploadLimit = 2 * 1024 * 1024;
 
 document.querySelector("#year").textContent = new Date().getFullYear();
 
-async function loadImprint() {
-  const container = document.querySelector("#imprint-content");
-  const source = document.querySelector("#imprint-source");
-  try {
-    const response = await fetch("/api/legal/imprint");
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || "Impressum nicht verfügbar.");
-    container.replaceChildren();
-    for (const section of data.sections) {
-      const article = document.createElement("article");
-      const heading = document.createElement("h3");
-      heading.textContent = section.heading;
-      article.appendChild(heading);
-      for (const line of section.lines) {
-        const paragraph = document.createElement("p");
-        paragraph.textContent = line;
-        article.appendChild(paragraph);
-      }
-      container.appendChild(article);
-    }
-    source.href = data.source_url;
-  } catch (error) {
-    container.textContent = "Die Betreiberangaben konnten nicht automatisch geladen werden. Bitte öffnen Sie das verlinkte Original-Impressum.";
-  }
-}
-
-loadImprint();
 
 function applyPaidAppearance(status) {
   const isPro = status.plan === "pro";
@@ -99,6 +68,10 @@ async function initializeBilling() {
     }
     const response = await fetch("/api/billing/config");
     const config = await response.json();
+    const money = (cents) => new Intl.NumberFormat("de-DE", {style:"currency",currency:"EUR"}).format(cents/100);
+    document.querySelector("#single-price").textContent = money(config.single_net_cents);
+    document.querySelector("#pro-price").textContent = money(config.pro_net_cents);
+    if (config.offer_banner) { const banner=document.querySelector("#offer-banner"); banner.textContent=config.offer_banner; banner.hidden=false; }
     for (const form of forms) {
       const button = form.querySelector("button");
       if (!config.enabled) {
@@ -149,6 +122,17 @@ function showFile(file) {
 }
 
 fileInput.addEventListener("change", () => showFile(fileInput.files[0]));
+fileInput.addEventListener("change", () => {
+  document.querySelector("#confirm-structure").value = "false";
+  const label = document.querySelector("#convert-form .primary-button span");
+  if (label.textContent.startsWith("Trotzdem")) {
+    label.textContent = document.body.classList.contains("billing-pro")
+      ? "Pro-Konvertierung starten"
+      : document.body.classList.contains("billing-single")
+        ? "Credit einsetzen und konvertieren"
+        : "PDF in X83 konvertieren";
+  }
+});
 for (const eventName of ["dragenter", "dragover"]) {
   fileDrop.addEventListener(eventName, (event) => {
     event.preventDefault();
@@ -188,6 +172,14 @@ form.addEventListener("submit", async (event) => {
       body: new FormData(form),
     });
     const data = await response.json();
+    if (response.status === 409) {
+      document.querySelector("#confirm-structure").value = "true";
+      showError(data.error);
+      submit.querySelector("span").textContent = "Trotzdem umwandeln und Credit verwenden";
+      submit.disabled = false;
+      submit.removeAttribute("aria-busy");
+      return;
+    }
     if (!response.ok) throw new Error(data.error || "Upload fehlgeschlagen.");
     form.hidden = true;
     jobPanel.hidden = false;
@@ -269,54 +261,4 @@ function showJobError(message) {
 
 newJobButton.addEventListener("click", () => {
   window.location.reload();
-});
-
-gaebInput.addEventListener("change", () => {
-  const file = gaebInput.files[0];
-  if (!file) return;
-  gaebFileTitle.textContent = file.name;
-  gaebFileMeta.textContent = `${(file.size / 1024 / 1024).toFixed(2)} MB`;
-});
-
-gaebReaderForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const file = gaebInput.files[0];
-  if (!file) return;
-  if (file.size > 2 * 1024 * 1024) {
-    gaebFileMeta.textContent = "Die Datei ist größer als 2 MB.";
-    gaebFileMeta.style.color = "var(--error)";
-    return;
-  }
-
-  const submit = gaebReaderForm.querySelector("button[type=submit]");
-  submit.disabled = true;
-  submit.setAttribute("aria-busy", "true");
-  gaebFileMeta.style.color = "";
-  gaebFileMeta.textContent = "PDF wird erstellt …";
-  try {
-    const response = await fetch("/api/gaeb-to-pdf", {
-      method: "POST",
-      body: new FormData(gaebReaderForm),
-    });
-    if (!response.ok) {
-      const data = await response.json();
-      throw new Error(data.error || "GAEB-Datei konnte nicht gelesen werden.");
-    }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${file.name.replace(/\.[^.]+$/, "") || "leistungsverzeichnis"}.pdf`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    gaebFileMeta.textContent = "PDF wurde erstellt.";
-  } catch (error) {
-    gaebFileMeta.textContent = error.message;
-    gaebFileMeta.style.color = "var(--error)";
-  } finally {
-    submit.disabled = false;
-    submit.removeAttribute("aria-busy");
-  }
 });
