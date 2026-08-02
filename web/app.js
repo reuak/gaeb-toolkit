@@ -256,7 +256,11 @@ form.addEventListener("submit", async (event) => {
       stopPreflightProgress();
       document.querySelector("#confirm-structure").value = "true";
       showError(data.error);
-      submit.querySelector("span").textContent = "Trotzdem umwandeln und Credit verwenden";
+      submit.querySelector("span").textContent = document.body.classList.contains("billing-single")
+        ? "Trotzdem umwandeln und Credit verwenden"
+        : document.body.classList.contains("billing-pro")
+          ? "Trotzdem umwandeln und Pro-Kontingent verwenden"
+          : "Trotzdem umwandeln und Freikonvertierung verwenden";
       submit.disabled = false;
       submit.removeAttribute("aria-busy");
       resetUploadButton.hidden = false;

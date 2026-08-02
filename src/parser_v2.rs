@@ -48,6 +48,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     let mut position_lines = Vec::<String>::new();
     let mut preamble_lines = Vec::<String>::new();
     let mut last_content_page = 1usize;
+    let mut document_finished = false;
 
     for (page_index, page) in text.split('\u{000C}').enumerate() {
         let page_number = page_index + 1;
@@ -58,6 +59,9 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
 
         for raw in page.lines() {
             let line = normalize_line(raw);
+            if document_finished {
+                continue;
+            }
             if is_noise(&line, &footer_re) {
                 continue;
             }
@@ -114,6 +118,18 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                 continue;
             }
 
+            if is_document_total(&line) {
+                finish_position(
+                    &mut boq,
+                    &headings,
+                    &mut current_position,
+                    &mut position_lines,
+                    page_number,
+                );
+                document_finished = true;
+                continue;
+            }
+
             if sum_re.is_match(&line)
                 || line.starts_with("Titelsumme:")
                 || line.starts_with("Gewerksumme:")
@@ -155,6 +171,20 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     apply_heading_titles(&mut boq.roots, &headings);
     validate(&mut boq);
     Ok(boq)
+}
+
+fn is_document_total(line: &str) -> bool {
+    let normalized = line.trim().to_lowercase();
+    [
+        "nettosumme",
+        "netto-summe",
+        "angebotssumme netto",
+        "zwischensumme netto",
+        "bruttosumme",
+        "brutto-summe",
+    ]
+    .iter()
+    .any(|marker| normalized.starts_with(marker))
 }
 
 fn priced_data_regex() -> Result<Regex, regex::Error> {
@@ -716,6 +746,24 @@ Summe 3.8.1. Vorbereitende Arbeiten .........................
         assert!(!first.long_text.contains("Summe"));
         assert!(!first.long_text.contains("Druckdatum"));
         assert_eq!(boq.roots[0].children[1].positions.len(), 1);
+    }
+
+    #[test]
+    fn stops_offer_position_before_totals_and_following_calculation_pages() {
+        let text = "10.00.001 Betonwände\nZulage, Wandanschluss an Massiv-Wände\nherstellen und Wandunebenheit ausgleichen.\n1,000 m 8,25 8,25\nNettosumme € 8,25\nMwSt. 19,00 % von 8,25 € 1,57\nBruttosumme € 9,82\nIBAN: DE81 5004 0000 0488 936 600\n\u{000C}Kalkulation Anschluss GK-Wand\nArbeitsplatz einrichten 0,02 std 52,00 € 1,04 €\n";
+        let boq = parse_text("nachtragsangebot.pdf", text).unwrap();
+        let position = &boq.roots[0].children[0].positions[0];
+
+        assert_eq!(position.short_text, "Betonwände");
+        assert_eq!(
+            position.long_text,
+            "Zulage, Wandanschluss an Massiv-Wände\nherstellen und Wandunebenheit ausgleichen."
+        );
+        assert!(!position.long_text.contains("Nettosumme"));
+        assert!(!position.long_text.contains("IBAN"));
+        assert!(!position.long_text.contains("Kalkulation"));
+        assert!(!boq.preamble.contains("IBAN"));
+        assert!(!boq.preamble.contains("Kalkulation"));
     }
 
     #[test]

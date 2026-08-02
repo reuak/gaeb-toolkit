@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>GAEB-Testlabor · Administration</title>
+    <link rel="stylesheet" href="/styles.css?v=11" />
+    <script src="/testlabor.js?v=1" defer></script>
+  </head>
+  <body>
+    <header class="site-header"><a class="brand" href="/">GAEB Konverter</a><nav class="main-nav"><a href="/admin.html">Administration</a><a class="is-active" href="/testlabor.html">Testlabor</a></nav></header>
+    <main class="account-main">
+      <section class="account-card">
+        <p class="eyebrow">Interner Massentest</p>
+        <h1>PDF-Stapel gegen den GAEB-Parser prüfen</h1>
+        <p>Die Dateien werden nacheinander verarbeitet und verbrauchen weder Freikontingent noch Credits. Pro PDF entsteht ein ZIP mit X83, optional X84 und einem JSON-Prüfbericht.</p>
+        <form id="test-form" class="login-form">
+          <label><span>Admin-Token *</span><input name="token" type="password" required autocomplete="current-password" /></label>
+          <label class="file-drop compact-file-drop"><input id="test-pdfs" name="pdfs" type="file" accept="application/pdf,.pdf" multiple required /><span class="file-icon">PDF</span><span class="file-title" id="test-file-title">Mehrere PDFs auswählen</span><span class="file-meta" id="test-file-meta">Maximal 25 MB je Datei</span></label>
+          <button class="primary-button" type="submit"><span>Teststapel verarbeiten</span><span>→</span></button>
+          <p class="form-note" id="test-note" aria-live="polite"></p>
+        </form>
+      </section>
+      <section class="account-card" id="test-results" hidden>
+        <div class="section-heading"><h2>Testergebnisse</h2><span id="test-summary"></span></div>
+        <div id="test-result-list"></div>
+      </section>
+    </main>
+  </body>
+</html>

@@ -414,6 +414,7 @@ async fn main() -> Result<()> {
         .route("/api/admin/reviews/approve", post(approve_review))
         .route("/api/support", post(create_support_case))
         .route("/api/admin/overview", get(admin_overview))
+        .route("/api/admin/test-convert", post(admin_test_convert))
         .route("/api/stripe/webhook", post(stripe_webhook))
         .route("/billing/access/{token}", get(activate_billing_access))
         .route("/api/jobs/{id}", get(job_status))
@@ -1240,6 +1241,129 @@ async fn admin_overview(
         reviews,
         support_cases,
     }))
+}
+
+async fn admin_test_convert(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Response, ApiError> {
+    require_admin(&state, &headers)?;
+    let mut filename = "test.pdf".to_owned();
+    let mut pdf = Vec::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| ApiError::bad_request("Testdatei konnte nicht gelesen werden."))?
+    {
+        if field.name() == Some("pdf") {
+            filename = field.file_name().unwrap_or(&filename).to_owned();
+            pdf = field
+                .bytes()
+                .await
+                .map_err(|_| ApiError::bad_request("Testdatei konnte nicht gelesen werden."))?
+                .to_vec();
+        }
+    }
+    if pdf.is_empty() || !pdf.starts_with(b"%PDF-") {
+        return Err(ApiError::bad_request(
+            "Bitte eine gültige PDF-Datei auswählen.",
+        ));
+    }
+    if pdf.len() > state.paid_max_upload_bytes {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Eine Testdatei darf maximal {} MB groß sein.",
+                state.paid_max_upload_bytes / 1024 / 1024
+            ),
+        ));
+    }
+
+    let source_name = safe_filename(&filename);
+    let archive_stem = safe_filename(
+        Path::new(&filename)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("gaeb-test"),
+    );
+    let archive_download_name = format!("{archive_stem}-gaeb-test.zip");
+    let result = task::spawn_blocking(move || -> Result<Vec<u8>> {
+        use std::io::{Cursor, Write};
+        use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+        let directory = tempfile::tempdir()?;
+        let input = directory.path().join("input.pdf");
+        let x83 = directory.path().join("output.x83");
+        let x84 = directory.path().join("output.x84");
+        std::fs::write(&input, &pdf)?;
+        let boq = parse_pdf(&input)?;
+        let positions = count_positions(&boq.roots);
+        let priced_positions = count_priced_positions(&boq.roots);
+        let areas = count_named_areas(&boq.roots);
+        let mut export_warnings = Vec::new();
+
+        if let Err(error) = write_x83(&boq, &x83, false) {
+            export_warnings.push(format!("Sicherer X83-Export: {error}"));
+            write_x83(&boq, &x83, true)?;
+        }
+        inject_pdf_pngs(&input, &x83, &boq)?;
+        apply_provisional_flags(&x83, &boq)?;
+
+        let has_x84 = has_prices(&boq.roots);
+        if has_x84 {
+            if let Err(error) = write_x84(&boq, &x84, false) {
+                export_warnings.push(format!("Sicherer X84-Export: {error}"));
+                write_x84(&boq, &x84, true)?;
+            }
+            inject_pdf_pngs(&input, &x84, &boq)?;
+            apply_provisional_flags(&x84, &boq)?;
+        }
+
+        let report = serde_json::to_vec_pretty(&serde_json::json!({
+            "source": source_name,
+            "positions": positions,
+            "priced_positions": priced_positions,
+            "named_areas": areas,
+            "x84_created": has_x84,
+            "parser_warnings": boq.warnings,
+            "export_warnings": export_warnings,
+            "notice": "Testexport ohne Kontingentverbrauch. Dateien fachlich und im Zielsystem prüfen."
+        }))?;
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let cursor = Cursor::new(Vec::new());
+        let mut archive = ZipWriter::new(cursor);
+        archive.start_file(format!("{archive_stem}.x83"), options)?;
+        archive.write_all(&std::fs::read(&x83)?)?;
+        if has_x84 {
+            archive.start_file(format!("{archive_stem}.x84"), options)?;
+            archive.write_all(&std::fs::read(&x84)?)?;
+        }
+        archive.start_file(format!("{archive_stem}-pruefbericht.json"), options)?;
+        archive.write_all(&report)?;
+        Ok(archive.finish()?.into_inner())
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+    .map_err(|error| {
+        error!(%error, "admin test conversion failed");
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Testkonvertierung fehlgeschlagen: {error}"),
+        )
+    })?;
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/zip"),
+    );
+    response_headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{archive_download_name}\""))
+            .map_err(|_| ApiError::internal())?,
+    );
+    Ok((response_headers, Body::from(result)).into_response())
 }
 
 async fn stripe_webhook(
@@ -2588,6 +2712,26 @@ fn has_prices(nodes: &[gaeb_toolkit::model::Node]) -> bool {
             .any(|position| position.unit_price.is_some() || position.total_price.is_some())
             || has_prices(&node.children)
     })
+}
+
+fn count_priced_positions(nodes: &[gaeb_toolkit::model::Node]) -> usize {
+    nodes
+        .iter()
+        .map(|node| {
+            node.positions
+                .iter()
+                .filter(|position| position.unit_price.is_some() || position.total_price.is_some())
+                .count()
+                + count_priced_positions(&node.children)
+        })
+        .sum()
+}
+
+fn count_named_areas(nodes: &[gaeb_toolkit::model::Node]) -> usize {
+    nodes
+        .iter()
+        .map(|node| usize::from(!node.title.trim().is_empty()) + count_named_areas(&node.children))
+        .sum()
 }
 
 fn count_named_sections(nodes: &[gaeb_toolkit::model::Node]) -> usize {

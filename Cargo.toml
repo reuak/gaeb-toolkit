@@ -31,6 +31,7 @@ tower-http = { version = "0.6", features = ["limit", "trace", "fs", "set-header"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 pretty_assertions = "1"
