@@ -12,6 +12,14 @@ const progressBar = document.querySelector("#progress-bar");
 const downloadButton = document.querySelector("#download-button");
 const reviewButton = document.querySelector("#review-button");
 const newJobButton = document.querySelector("#new-job-button");
+const preflightPanel = document.querySelector("#preflight-progress");
+const preflightStatus = document.querySelector("#preflight-status");
+const preflightDetail = document.querySelector("#preflight-detail");
+const preflightPercent = document.querySelector("#preflight-percent");
+const preflightBar = document.querySelector("#preflight-bar");
+const resetUploadButton = document.querySelector("#reset-upload-button");
+let activeUploadController = null;
+let preflightTimer = null;
 let pdfUploadLimit = 2 * 1024 * 1024;
 
 document.querySelector("#year").textContent = new Date().getFullYear();
@@ -127,6 +135,9 @@ function showFile(file) {
 fileInput.addEventListener("change", () => showFile(fileInput.files[0]));
 fileInput.addEventListener("change", () => {
   document.querySelector("#confirm-structure").value = "false";
+  resetUploadButton.hidden = true;
+  preflightPanel.hidden = true;
+  fileMeta.style.color = "";
   const label = document.querySelector("#convert-form .primary-button span");
   if (label.textContent.startsWith("Trotzdem")) {
     label.textContent = document.body.classList.contains("billing-pro")
@@ -136,6 +147,61 @@ fileInput.addEventListener("change", () => {
         : "PDF in X83 konvertieren";
   }
 });
+
+function normalSubmitLabel() {
+  return document.body.classList.contains("billing-pro")
+    ? "Pro-Konvertierung starten"
+    : document.body.classList.contains("billing-single")
+      ? "Credit einsetzen und konvertieren"
+      : "PDF in X83 konvertieren";
+}
+
+function updatePreflight(percent, status, detail) {
+  preflightBar.style.width = `${percent}%`;
+  preflightPercent.textContent = `${percent} %`;
+  preflightStatus.textContent = status;
+  preflightDetail.textContent = detail;
+}
+
+function startPreflightProgress(canCancel) {
+  clearInterval(preflightTimer);
+  preflightPanel.hidden = false;
+  resetUploadButton.hidden = !canCancel;
+  updatePreflight(10, "Datei wird hochgeladen …", "Das PDF wird verschlüsselt übertragen.");
+  const startedAt = Date.now();
+  preflightTimer = setInterval(() => {
+    const seconds = (Date.now() - startedAt) / 1000;
+    if (seconds > 18) updatePreflight(88, "GAEB-Entwurf wird vorbereitet …", "Die erkannten Positionen werden für den Export validiert.");
+    else if (seconds > 9) updatePreflight(70, "LV-Struktur wird geprüft …", "Ordnungszahlen, Bereiche, Mengen und Positionen werden ausgewertet.");
+    else if (seconds > 3) updatePreflight(42, "Textebene und deutsche OCR werden geprüft …", "Bei Scan-PDFs kann dieser Schritt etwas länger dauern.");
+    else updatePreflight(22, "PDF wird geöffnet …", "Seiten und Dokumentstruktur werden gelesen.");
+  }, 700);
+}
+
+function stopPreflightProgress() {
+  clearInterval(preflightTimer);
+  preflightTimer = null;
+  preflightPanel.hidden = true;
+}
+
+function resetUpload() {
+  activeUploadController?.abort();
+  activeUploadController = null;
+  stopPreflightProgress();
+  document.querySelector("#confirm-structure").value = "false";
+  fileInput.value = "";
+  fileTitle.textContent = "PDF auswählen oder hier ablegen";
+  fileMeta.textContent = `Maximal ${(pdfUploadLimit / 1024 / 1024).toFixed(0)} MB`;
+  fileMeta.style.color = "";
+  form.querySelector("button[type=submit] span").textContent = normalSubmitLabel();
+  const submit = form.querySelector("button[type=submit]");
+  submit.disabled = false;
+  submit.removeAttribute("aria-busy");
+  resetUploadButton.hidden = true;
+  fileInput.click();
+}
+
+resetUploadButton.addEventListener("click", resetUpload);
 for (const eventName of ["dragenter", "dragover"]) {
   fileDrop.addEventListener(eventName, (event) => {
     event.preventDefault();
@@ -154,6 +220,10 @@ fileDrop.addEventListener("drop", (event) => {
   const transfer = new DataTransfer();
   transfer.items.add(file);
   fileInput.files = transfer.files;
+  document.querySelector("#confirm-structure").value = "false";
+  form.querySelector("button[type=submit] span").textContent = normalSubmitLabel();
+  resetUploadButton.hidden = true;
+  fileMeta.style.color = "";
   showFile(file);
 });
 
@@ -167,31 +237,43 @@ form.addEventListener("submit", async (event) => {
   }
 
   const submit = form.querySelector("button[type=submit]");
+  const confirmed = document.querySelector("#confirm-structure").value === "true";
   submit.disabled = true;
   submit.setAttribute("aria-busy", "true");
+  activeUploadController = new AbortController();
+  startPreflightProgress(!confirmed);
   try {
     const response = await fetch("/api/convert", {
       method: "POST",
       body: new FormData(form),
+      signal: activeUploadController.signal,
     });
     const data = await response.json();
     if (response.status === 409) {
+      stopPreflightProgress();
       document.querySelector("#confirm-structure").value = "true";
       showError(data.error);
       submit.querySelector("span").textContent = "Trotzdem umwandeln und Credit verwenden";
       submit.disabled = false;
       submit.removeAttribute("aria-busy");
+      resetUploadButton.hidden = false;
       return;
     }
     if (!response.ok) throw new Error(data.error || "Upload fehlgeschlagen.");
+    updatePreflight(100, "Vorprüfung abgeschlossen", "Der Konvertierungsauftrag wurde gestartet.");
+    stopPreflightProgress();
     form.hidden = true;
     jobPanel.hidden = false;
     await pollJob(data.id, data.token);
     submit.removeAttribute("aria-busy");
   } catch (error) {
+    stopPreflightProgress();
+    if (error.name === "AbortError") return;
     showError(error.message);
     submit.disabled = false;
     submit.removeAttribute("aria-busy");
+  } finally {
+    activeUploadController = null;
   }
 });
 

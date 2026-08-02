@@ -408,6 +408,13 @@ body.billing-active .trust-row span:first-child {
 @keyframes spin { to { transform: rotate(360deg); } }
 .progress { height: 5px; margin: 25px 0; overflow: hidden; border-radius: 99px; background: #e5e9e4; }
 .progress span { display: block; width: 38%; height: 100%; border-radius: inherit; background: var(--green); transition: width 400ms ease; }
+.preflight-progress { margin-top:4px; padding:16px; border:1px solid rgba(13,107,79,.2); border-radius:14px; background:#f4f7ef; }
+.preflight-progress .progress { height:8px; margin:12px 0; }
+.preflight-progress .progress span { width:10%; background:linear-gradient(90deg,var(--green),var(--lime)); transition:width 650ms ease; }
+.preflight-heading { display:flex; justify-content:space-between; gap:15px; color:var(--green-dark); font-size:13px; }
+.preflight-progress p { margin:0; color:var(--muted); font-size:12px; line-height:1.45; }
+.reset-upload-button { width:100%; border:1px solid rgba(165,62,53,.25); color:var(--error); background:#fff7f4; }
+.reset-upload-button:hover { background:#fcebe6; }
 
 .how-it-works {
   width: min(1180px, calc(100% - 40px));
