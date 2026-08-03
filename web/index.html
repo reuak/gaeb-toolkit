@@ -10,8 +10,8 @@
     <meta name="theme-color" content="#f4f2e9" />
     <title>LV Konverter · PDF und GAEB lesbar austauschen</title>
     <link rel="icon" type="image/png" href="/assets/gaeb-konverter-icon.png?v=2" />
-    <link rel="stylesheet" href="/styles.css?v=10" />
-    <script src="/offer.js?v=1" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=12" />
+    <script src="/offer.js?v=2" defer></script>
     <script src="/app.js?v=12" defer></script>
     <script src="/consent.js" defer></script>
   </head>
@@ -179,7 +179,9 @@
         <div class="pricing-grid">
           <article class="price-card">
             <p class="step-label">Einzelkauf</p>
-            <h3><span id="single-price">9,90 €</span> <small>netto</small></h3>
+            <p class="price-offer-label" id="single-offer-label">Einführungsangebot</p>
+            <p class="regular-price" id="single-regular-row">Regulär <del id="single-regular-price">9,90 €</del></p>
+            <h3><span id="single-price">2,99 €</span> <small>netto</small></h3>
             <p>Ein Dokument bis 25 MB, X83/X84, Fehlerprotokoll und sieben Tage Download.</p>
             <form class="checkout-form" data-offer="single">
               <label><span>E-Mail</span><input type="email" name="email" required autocomplete="email" /></label>
@@ -189,7 +191,9 @@
           </article>
           <article class="price-card featured">
             <p class="step-label">Pro-Abo</p>
-            <h3><span id="pro-price">19,00 €</span> <small>netto / Monat</small></h3>
+            <p class="price-offer-label" id="pro-offer-label">Einführungsangebot</p>
+            <p class="regular-price" id="pro-regular-row">Regulär <del id="pro-regular-price">19,00 €</del></p>
+            <h3><span id="pro-price">12,99 €</span> <small>netto / Monat</small></h3>
             <p>100 Dokumente monatlich, bis 25 MB je Datei und insgesamt 2 GB Speicher.</p>
             <form class="checkout-form" data-offer="pro">
               <label><span>E-Mail</span><input type="email" name="email" required autocomplete="email" /></label>

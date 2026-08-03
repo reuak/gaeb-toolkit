@@ -141,6 +141,8 @@ struct BillingConfigResponse {
     enabled: bool,
     single_net_cents: u32,
     pro_net_cents: u32,
+    regular_single_net_cents: u32,
+    regular_pro_net_cents: u32,
     offer_banner: Option<String>,
 }
 
@@ -420,6 +422,7 @@ async fn main() -> Result<()> {
         .route("/api/jobs/{id}", get(job_status))
         .route("/download/{id}/{token}", get(download))
         .route("/download/{id}/{token}/{format}", get(download_format))
+        .route("/testlabor.html", get(test_lab_page))
         .fallback_service(ServeDir::new("web").append_index_html_on_directories(true))
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("permissions-policy"),
@@ -464,6 +467,8 @@ async fn billing_config(State(state): State<Arc<AppState>>) -> Json<BillingConfi
         enabled: state.stripe.is_some(),
         single_net_cents: state.offer.single_net_cents,
         pro_net_cents: state.offer.pro_net_cents,
+        regular_single_net_cents: env_u32("REGULAR_SINGLE_NET_CENTS", 990),
+        regular_pro_net_cents: env_u32("REGULAR_PRO_NET_CENTS", 1900),
         offer_banner: state.offer.banner.clone(),
     })
 }
@@ -1248,6 +1253,9 @@ async fn admin_test_convert(
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Response, ApiError> {
+    if !env_bool("TEST_LAB_ENABLED", false) {
+        return Err(ApiError::not_found("Testlabor ist nicht aktiviert."));
+    }
     require_admin(&state, &headers)?;
     let mut filename = "test.pdf".to_owned();
     let mut pdf = Vec::new();
@@ -1364,6 +1372,22 @@ async fn admin_test_convert(
             .map_err(|_| ApiError::internal())?,
     );
     Ok((response_headers, Body::from(result)).into_response())
+}
+
+async fn test_lab_page() -> Result<Response, ApiError> {
+    if !env_bool("TEST_LAB_ENABLED", false) {
+        return Err(ApiError::not_found("Testlabor ist nicht aktiviert."));
+    }
+    let bytes = fs::read("web/testlabor.html")
+        .await
+        .map_err(|_| ApiError::not_found("Testlabor ist nicht verfügbar."))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok((headers, Body::from(bytes)).into_response())
 }
 
 async fn stripe_webhook(
@@ -3103,6 +3127,17 @@ fn env_u32(name: &str, default: u32) -> u32 {
     env::var(name)
         .ok()
         .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    env::var(name)
+        .ok()
+        .and_then(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
         .unwrap_or(default)
 }
 
