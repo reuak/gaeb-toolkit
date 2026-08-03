@@ -140,16 +140,24 @@ STRIPE_SINGLE_PRICE_ID=
 STRIPE_PRO_PRICE_ID=
 SINGLE_NET_CENTS=990
 PRO_NET_CENTS=1900
+REGULAR_SINGLE_NET_CENTS=990
+REGULAR_PRO_NET_CENTS=1900
 OFFER_BANNER_TEXT=
 ADMIN_TOKEN=
+TEST_LAB_ENABLED=false
 RUST_LOG=info
 ```
 
 Die angezeigten Cent-Beträge müssen immer exakt zu den hinterlegten Stripe-Price-IDs
 passen. Für einen Aktionspreis werden in Stripe neue Preise angelegt und anschließend
-Price-ID und Cent-Betrag gemeinsam umgestellt. `OFFER_BANNER_TEXT` aktiviert optional
-ein Aktionsbanner. Der interne Bereich `/admin.html` ist nur verfügbar, wenn ein langer,
+Price-ID und Cent-Betrag gemeinsam umgestellt. `REGULAR_SINGLE_NET_CENTS` und
+`REGULAR_PRO_NET_CENTS` steuern ausschließlich den durchgestrichenen Vergleichspreis;
+sie werden nur angezeigt, wenn der jeweilige aktuelle Preis niedriger ist.
+`OFFER_BANNER_TEXT` aktiviert optional ein Aktionsbanner. Der interne Bereich `/admin.html` ist nur verfügbar, wenn ein langer,
 zufälliger `ADMIN_TOKEN` gesetzt wurde.
+Das PDF-Stapel-Testlabor unter `/testlabor.html` und sein API-Endpunkt sind nur
+erreichbar, wenn zusätzlich `TEST_LAB_ENABLED=true` gesetzt ist. Im regulären
+Betrieb sollte der Wert `false` bleiben.
 
 ### Stripe im Testmodus
 
@@ -196,3 +204,13 @@ Speicherdauer und die Einwilligung für Funktionsinformationen abdecken und
 rechtlich geprüft werden. Einwilligungen für Funktionsinformationen werden in
 `feature_subscriptions` bis zum Widerruf gespeichert; vor einem tatsächlichen
 Newsletterversand sollte ein Double-Opt-in-Verfahren ergänzt werden.
+
+## Lizenz
+
+Der eigene Quellcode dieses Projekts steht unter der
+[MIT-Lizenz](LICENSE). Copyright (c) 2026 Hawk Vision GmbH.
+
+Das Projekt verwendet Open-Source-Komponenten mit eigenen Lizenzbedingungen.
+Eine Übersicht der direkten Rust-Abhängigkeiten und der im Container verwendeten
+Werkzeuge enthält [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md). Die exakten
+Versionen des vollständigen Rust-Abhängigkeitsbaums sind in `Cargo.lock` fixiert.

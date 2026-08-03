@@ -490,6 +490,21 @@ body.billing-active .trust-row span:first-child {
 }
 .price-card h3 { margin: 6px 0 12px; font-size: 1.8rem; }
 .price-card h3 small { font: inherit; font-size: 0.78rem; color: var(--muted); }
+.price-offer-label {
+  display: inline-flex;
+  margin: 8px 0 5px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #c65b25;
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.regular-price { margin: 0; color: var(--muted); font-size: 0.86rem; }
+.regular-price del { text-decoration-color: #c65b25; text-decoration-thickness: 2px; }
+.price-offer-label + .regular-price + h3 { margin-top: 2px; color: #c65b25; }
 .checkout-form { display: grid; gap: 10px; margin-top: 18px; }
 .checkout-form label { display: grid; gap: 5px; }
 .checkout-form input { width: 100%; }
