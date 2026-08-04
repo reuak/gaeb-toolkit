@@ -46,7 +46,9 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     let short_four_part_profile =
         has_short_four_part_positions(text, &position_start_re, &priced_data_re);
     let sum_re = Regex::new(r"^Summe\s+\d+(?:\.\d+){1,5}\.?(?:\s|$)")?;
-    let footer_re = Regex::new(r"^Druckausgabe vom:.*\d+\s*/\s*\d+\s*$")?;
+    let footer_re = Regex::new(
+        r"^(?:Druckausgabe vom:.*|\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}.*)\d+\s*/\s*\d+\s*$",
+    )?;
 
     let mut boq = BillOfQuantities::new(source);
     let mut headings = HeadingMap::new();
@@ -63,10 +65,22 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
             last_content_page = page_number;
         }
         extract_metadata(&mut boq, page);
+        let page_lines = page.lines().map(normalize_line).collect::<Vec<_>>();
+        let first_oz_index = page_lines
+            .iter()
+            .position(|line| position_start_re.is_match(line));
+        let table_header_index = page_lines
+            .iter()
+            .position(|line| line.starts_with("OZ Leistungsbeschreibung"))
+            .filter(|header_index| first_oz_index.is_none_or(|oz_index| *header_index < oz_index));
 
-        for raw in page.lines() {
-            let line = normalize_line(raw);
+        for (line_index, line) in page_lines.into_iter().enumerate() {
             if document_finished {
+                continue;
+            }
+            // Auf Folgeseiten steht der wiederholte Brief-/Projektkopf vor der
+            // Spaltenüberschrift. Er gehört nie zum Text einer laufenden Position.
+            if table_header_index.is_some_and(|header_index| line_index <= header_index) {
                 continue;
             }
             if is_noise(&line, &footer_re) {
@@ -753,6 +767,27 @@ Abbrechen und fachgerechtes Entsorgen einer Deckenkleidung.\n\
         assert_eq!(boq.roots[0].children[0].oz, "01.02");
         assert_eq!(boq.roots[0].children[0].title, "Allgemeines");
         assert_eq!(boq.roots[0].children[0].positions[0].oz, "01.02.010");
+    }
+
+    #[test]
+    fn excludes_repeated_page_headers_from_continued_position_text() {
+        let text = "Firma Beispiel GmbH\nProjekt: Test\nOZ Leistungsbeschreibung Menge ME EP in EUR GB in EUR\n24. Trockenbauarbeiten\n24.220 Tragständer/Traverse, wandhängende Lasten\nErster Teil der Beschreibung.\n03.08.2026 15:27 LV\\Leistungsverzeichnis ohne Preise 14 / 23\n\u{000C}Firma Beispiel GmbH\nProjekt: Test\nLeistungsverzeichnis ohne Preise\nOZ Leistungsbeschreibung Menge ME EP in EUR GB in EUR\nFortsetzung der Beschreibung.\n1,000 st ......................... (.........................)\n";
+        let boq = parse_text("continued.pdf", text).unwrap();
+        let position = &boq.roots[0].positions[0];
+
+        assert_eq!(position.oz, "24.220");
+        assert_eq!(
+            position.short_text,
+            "Tragständer/Traverse, wandhängende Lasten"
+        );
+        assert_eq!(
+            position.long_text,
+            "Erster Teil der Beschreibung.\nFortsetzung der Beschreibung."
+        );
+        assert!(!position.long_text.contains("Firma Beispiel"));
+        assert!(!position.long_text.contains("14 / 23"));
+        assert_eq!(position.page_from, Some(1));
+        assert_eq!(position.page_to, Some(2));
     }
 
     #[test]
