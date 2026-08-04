@@ -8,3 +8,7 @@
     Permissions-Policy "camera=(), microphone=(), geolocation=()"
   }
 }
+
+geab.hawk-vision.de {
+  redir https://gaeb.hawk-vision.de{uri} permanent
+}

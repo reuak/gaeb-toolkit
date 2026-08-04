@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::Path, process::Command, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    process::Command,
+    str::FromStr,
+};
 
 use anyhow::{bail, Context, Result};
 use regex::Regex;
@@ -31,9 +36,10 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> Result<BillOfQuantities> {
 }
 
 pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
+    let two_part_positions = find_two_part_position_oz(text)?;
     let heading_re = Regex::new(r"^(?P<oz>\d+(?:\.\d+){0,4})(?P<trailing>\.)?\s+(?P<title>\S.*)$")?;
     let position_start_re =
-        Regex::new(r"^(?P<oz>\d+(?:\.\d+){2,5})(?P<trailing>\.)?(?:\s+(?P<rest>.*))?$")?;
+        Regex::new(r"^(?P<oz>\d+(?:\.\d+){1,5})(?P<trailing>\.)?(?:\s+(?P<rest>.*))?$")?;
     let six_part_profile_re = Regex::new(r"(?m)^\s*\d+(?:\.\d+){5}\s+\S")?;
     let six_part_profile = six_part_profile_re.is_match(text);
     let priced_data_re = priced_data_regex()?;
@@ -49,6 +55,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     let mut preamble_lines = Vec::<String>::new();
     let mut last_content_page = 1usize;
     let mut document_finished = false;
+    let mut pending_provisional = false;
 
     for (page_index, page) in text.split('\u{000C}').enumerate() {
         let page_number = page_index + 1;
@@ -66,10 +73,19 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                 continue;
             }
 
-            if let Some(caps) = position_start_re
-                .captures(&line)
-                .filter(|caps| is_position_oz(caps, six_part_profile, short_four_part_profile))
-            {
+            if line.eq_ignore_ascii_case("*** Bedarfsposition nachrichtlicher GB") {
+                pending_provisional = true;
+                continue;
+            }
+
+            if let Some(caps) = position_start_re.captures(&line).filter(|caps| {
+                is_position_oz(
+                    caps,
+                    six_part_profile,
+                    short_four_part_profile,
+                    &two_part_positions,
+                )
+            }) {
                 finish_position(
                     &mut boq,
                     &headings,
@@ -82,8 +98,10 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                 let mut position = Position {
                     oz: caps["oz"].to_owned(),
                     page_from: Some(page_number),
+                    provisional: pending_provisional,
                     ..Position::default()
                 };
+                pending_provisional = false;
 
                 if let Some(price_caps) = priced_data_re.captures(rest) {
                     apply_price_captures(&mut position, &price_caps, rest);
@@ -168,6 +186,12 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
         last_content_page,
     );
     boq.preamble = preamble_lines.join("\n").trim().to_owned();
+    if !two_part_positions.is_empty() {
+        boq.warnings.push(format!(
+            "Verkürzte zweistufige OZ-Struktur erkannt: {} Position(en) werden unverändert in den GAEB-Export übernommen.",
+            two_part_positions.len()
+        ));
+    }
     apply_heading_titles(&mut boq.roots, &headings);
     validate(&mut boq);
     Ok(boq)
@@ -195,8 +219,49 @@ fn priced_data_regex() -> Result<Regex, regex::Error> {
 
 fn trailing_quantity_regex() -> Result<Regex, regex::Error> {
     Regex::new(
-        r"(?P<qty>\d[\d.]*(?:,\d{1,3})?)\s+(?P<unit>\S+)\s+(?:(?P<ep>-?[\d.]+,\d{2})\.?|\.{3,})\s*(?:€|EUR)?(?:\s+(?:Bedarf\s+)?(?:(?P<gb>-?[\d.]+,\d{2})|\.{3,})\s*(?:€|EUR)?|\s+(?P<price_only>(?:Nur\s+Einh\.-Pr\.|nur\s+EP)))?\s*$",
+        r"(?P<qty>\d[\d.]*(?:,\d{1,3})?)\s+(?P<unit>\S+)\s+(?:(?P<ep>-?[\d.]+,\d{2})\.?|\.{3,})\s*(?:€|EUR)?(?:\s+\(?(?:Bedarf\s+)?(?:(?P<gb>-?[\d.]+,\d{2})|\.{3,})\)?\s*(?:€|EUR)?|\s+(?P<price_only>(?:Nur\s+Einh\.-Pr\.|nur\s+EP)))?\s*$",
     )
+}
+
+/// Kürzere Ausschreibungs-LVs verwenden beispielsweise `24.` als Bereich und
+/// `24.10` bis `24.320` als Positionen. Eine zweistufige Zeile gilt nur dann
+/// als Position, wenn vor der nächsten OZ eine plausible Mengenzeile folgt.
+/// Die fachliche OZ bleibt dabei unverändert.
+fn find_two_part_position_oz(text: &str) -> Result<HashSet<String>> {
+    let candidate_re =
+        Regex::new(r"^(?P<indent>\s*)(?P<parent>\d+)\.(?P<item>\d{1,3})(?P<rest>\s+\S.*)$")?;
+    let multi_part_oz_re = Regex::new(r"^(?P<oz>\d+(?:\.\d+){2,5})\.?\s+\S")?;
+    let quantity_re = Regex::new(r"^\d[\d.]*(?:,\d{1,3})?\s+\S+")?;
+    let lines = text.lines().collect::<Vec<_>>();
+    let normalized_lines = lines
+        .iter()
+        .map(|line| normalize_line(line))
+        .collect::<Vec<_>>();
+    let mut positions = HashSet::new();
+
+    for (index, raw) in lines.iter().enumerate() {
+        let Some(captures) = candidate_re.captures(raw) else {
+            continue;
+        };
+        let has_quantity = normalized_lines[index + 1..]
+            .iter()
+            .take_while(|line| {
+                if candidate_re.is_match(line) {
+                    return false;
+                }
+                multi_part_oz_re.captures(line).is_none_or(|captures| {
+                    let components = captures["oz"].split('.').collect::<Vec<_>>();
+                    is_date_like_oz(&components)
+                })
+            })
+            .any(|line| quantity_re.is_match(line));
+        if !has_quantity {
+            continue;
+        }
+        positions.insert(format!("{}.{}", &captures["parent"], &captures["item"]));
+    }
+
+    Ok(positions)
 }
 
 fn has_short_four_part_positions(
@@ -247,6 +312,7 @@ fn is_position_oz(
     caps: &regex::Captures<'_>,
     six_part_profile: bool,
     short_four_part_profile: bool,
+    two_part_positions: &HashSet<String>,
 ) -> bool {
     let components = caps["oz"].split('.').collect::<Vec<_>>();
     if is_date_like_oz(&components) {
@@ -259,6 +325,7 @@ fn is_position_oz(
         return components.len() == 4;
     }
     match components.len() {
+        2 => two_part_positions.contains(&caps["oz"]),
         3 => caps.name("trailing").is_some() || components[2].len() >= 3,
         4 => components[3].len() >= 3,
         6 => true,
@@ -528,14 +595,25 @@ fn apply_heading_titles(nodes: &mut [Node], headings: &HeadingMap) {
 fn validate(boq: &mut BillOfQuantities) {
     let mut seen = std::collections::HashSet::new();
     let mut warnings = Vec::new();
+    let priced_document = has_any_price(&boq.roots);
     for root in &boq.roots {
-        validate_node(root, &mut seen, &mut warnings);
+        validate_node(root, priced_document, &mut seen, &mut warnings);
     }
     boq.warnings.extend(warnings);
 }
 
+fn has_any_price(nodes: &[Node]) -> bool {
+    nodes.iter().any(|node| {
+        node.positions
+            .iter()
+            .any(|position| position.unit_price.is_some() || position.total_price.is_some())
+            || has_any_price(&node.children)
+    })
+}
+
 fn validate_node(
     node: &Node,
+    priced_document: bool,
     seen: &mut std::collections::HashSet<String>,
     warnings: &mut Vec<String>,
 ) {
@@ -548,7 +626,10 @@ fn validate_node(
                 .long_text
                 .lines()
                 .any(|line| line == "Position entfällt");
-        if !omitted && (position.quantity.is_none() || position.unit_price.is_none()) {
+        if priced_document
+            && !omitted
+            && (position.quantity.is_none() || position.unit_price.is_none())
+        {
             warnings.push(format!("Unvollständige Preiszeile: {}", position.oz));
         }
         if let (Some(quantity), Some(unit_price), Some(total)) =
@@ -561,7 +642,7 @@ fn validate_node(
         }
     }
     for child in &node.children {
-        validate_node(child, seen, warnings);
+        validate_node(child, priced_document, seen, warnings);
     }
 }
 
@@ -623,6 +704,55 @@ mod tests {
             position.long_text,
             "Kunststoff-Mantelleitung liefern und verlegen\n10 Rundleiter 16 mm² Cu\n3 Stromkreise anschließen\n7235. Gehäuse mit wirksamer Auskleidung"
         );
+    }
+
+    #[test]
+    fn parses_two_part_zueblin_positions_without_reclassifying_headings() {
+        let text = "Leistungsverzeichnis ohne Preise\n\
+24. Trockenbauarbeiten\n\
+*** Bedarfsposition nachrichtlicher GB\n\
+24.10 Montagewand abbrechen, GK\n\
+Abbrechen und fachgerechtes Entsorgen einer Montagewand.\n\
+1,000 m² ......................... (.........................)\n\
+*** Bedarfsposition nachrichtlicher GB\n\
+24.20 Deckenkleidung abbrechen, GK\n\
+Abbrechen und fachgerechtes Entsorgen einer Deckenkleidung.\n\
+1,000 m² ......................... (.........................)\n";
+        let boq = parse_text("trockenbau.pdf", text).unwrap();
+
+        assert_eq!(boq.roots.len(), 1);
+        assert_eq!(boq.roots[0].oz, "24");
+        assert_eq!(boq.roots[0].title, "Trockenbauarbeiten");
+        assert_eq!(boq.roots[0].positions.len(), 2);
+        assert_eq!(boq.roots[0].positions[0].oz, "24.10");
+        assert_eq!(
+            boq.roots[0].positions[0].quantity,
+            Some(Decimal::new(1000, 3))
+        );
+        assert_eq!(boq.roots[0].positions[0].unit.as_deref(), Some("m²"));
+        assert!(boq.roots[0].positions[0].provisional);
+        assert_eq!(boq.roots[0].positions[1].oz, "24.20");
+        assert!(boq
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("2 Position(en)")));
+        assert!(boq
+            .warnings
+            .iter()
+            .all(|warning| !warning.starts_with("Unvollständige Preiszeile:")));
+    }
+
+    #[test]
+    fn keeps_two_part_heading_without_quantity_as_heading() {
+        let boq = parse_text(
+            "headings.pdf",
+            "01 Bereich\n01.02 Allgemeines\n01.02.010 Beschreibung\n1,000 St ......................... .........................\n",
+        )
+        .unwrap();
+
+        assert_eq!(boq.roots[0].children[0].oz, "01.02");
+        assert_eq!(boq.roots[0].children[0].title, "Allgemeines");
+        assert_eq!(boq.roots[0].children[0].positions[0].oz, "01.02.010");
     }
 
     #[test]

@@ -619,7 +619,7 @@ async fn checkout_status(
         && sent_at
             .as_deref()
             .and_then(parse_time)
-            .map_or(true, |sent| Utc::now() - sent >= ChronoDuration::minutes(2));
+            .is_none_or(|sent| Utc::now() - sent >= ChronoDuration::minutes(2));
     Ok(Json(CheckoutStatusResponse {
         status,
         offer,
@@ -663,28 +663,7 @@ async fn request_account_login(
         ));
     }
     let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
-    let last_sent: Option<String> = connection
-        .query_row(
-            "SELECT access_email_sent_at FROM billing_accounts WHERE email = ?1",
-            [&email],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(|_| ApiError::internal())?
-        .flatten();
-    let may_send = last_sent
-        .as_deref()
-        .and_then(parse_time)
-        .map_or(true, |at| Utc::now() - at >= ChronoDuration::minutes(2));
-    if may_send
-        && connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM billing_accounts WHERE email=?1)",
-                [&email],
-                |r| r.get::<_, bool>(0),
-            )
-            .unwrap_or(false)
-    {
+    if account_access_email_allowed(&connection, &email).map_err(|_| ApiError::internal())? {
         issue_billing_access_email(
             &state,
             &PurchaseNotice {
@@ -695,6 +674,21 @@ async fn request_account_login(
         .map_err(|_| ApiError::internal())?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn account_access_email_allowed(connection: &Connection, email: &str) -> Result<bool> {
+    let last_sent: Option<Option<String>> = connection
+        .query_row(
+            "SELECT access_email_sent_at FROM billing_accounts WHERE email = ?1",
+            [&email],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(last_sent.is_some_and(|sent| {
+        sent.as_deref()
+            .and_then(parse_time)
+            .is_none_or(|at| Utc::now() - at >= ChronoDuration::minutes(2))
+    }))
 }
 
 fn validate_account_registration(request: &AccountRegistrationRequest) -> Result<String, ApiError> {
@@ -761,14 +755,16 @@ async fn register_account(
     if !exists {
         save_account_address(&connection, &email, &request).map_err(|_| ApiError::internal())?;
     }
-    issue_billing_access_email(
-        &state,
-        &PurchaseNotice {
-            email,
-            offer: "account".into(),
-        },
-    )
-    .map_err(|_| ApiError::internal())?;
+    if account_access_email_allowed(&connection, &email).map_err(|_| ApiError::internal())? {
+        issue_billing_access_email(
+            &state,
+            &PurchaseNotice {
+                email,
+                offer: "account".into(),
+            },
+        )
+        .map_err(|_| ApiError::internal())?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -786,7 +782,19 @@ async fn update_account_address(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn account_logout() -> Response {
+async fn account_logout(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if let Some(raw_session) = cookie_value(&headers, "gaeb_session") {
+        let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+        connection
+            .execute(
+                "DELETE FROM billing_sessions WHERE session_hash = ?1",
+                [hash_token(&raw_session)],
+            )
+            .map_err(|_| ApiError::internal())?;
+    }
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -794,7 +802,7 @@ async fn account_logout() -> Response {
             "gaeb_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax",
         ),
     );
-    response
+    Ok(response)
 }
 
 async fn account_overview(
@@ -1130,12 +1138,16 @@ async fn approve_review(
 }
 
 fn mask_profanity(text: &str) -> String {
-    let expression =
-        regex::RegexBuilder::new(r"\b(arschloch|schei(?:ß|ss)e|wichser|hurensohn|fotze|idiot)\b")
+    static EXPRESSION: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    EXPRESSION
+        .get_or_init(|| {
+            regex::RegexBuilder::new(
+                r"\b(arschloch|schei(?:ß|ss)e|wichser|hurensohn|fotze|idiot)\b",
+            )
             .case_insensitive(true)
             .build()
-            .expect("valid moderation regex");
-    expression
+            .expect("valid moderation regex")
+        })
         .replace_all(text, |captures: &regex::Captures<'_>| {
             "*".repeat(captures[0].chars().count())
         })
@@ -1505,7 +1517,7 @@ fn verify_stripe_signature(signature: &str, body: &[u8], secret: &str) -> Result
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, ()> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(());
     }
     (0..value.len())
@@ -2277,7 +2289,7 @@ fn validate_form(
     if form.contact_name.chars().count() < 2 {
         return Err(ApiError::bad_request("Bitte einen Kontaktnamen angeben."));
     }
-    if !form.email.contains('@') || form.email.len() > 254 {
+    if !valid_email(&form.email) {
         return Err(ApiError::bad_request(
             "Bitte eine gültige E-Mail-Adresse angeben.",
         ));
@@ -2938,7 +2950,7 @@ fn checkout_notice_for_resend(db_path: &Path, id: &str) -> Result<Option<Purchas
         let allowed = sent
             .as_deref()
             .and_then(parse_time)
-            .map_or(true, |at| Utc::now() - at >= ChronoDuration::minutes(2));
+            .is_none_or(|at| Utc::now() - at >= ChronoDuration::minutes(2));
         allowed.then_some(PurchaseNotice { email, offer })
     }))
 }
@@ -3320,15 +3332,20 @@ impl IntoResponse for ApiError {
 mod tests {
     use std::sync::Arc;
 
-    use chrono::Utc;
+    use axum::{
+        extract::State,
+        http::{header, HeaderMap, HeaderValue, StatusCode},
+    };
+    use chrono::{Duration as ChronoDuration, Utc};
     use hmac::{Hmac, Mac};
-    use rusqlite::Connection;
+    use rusqlite::{params, Connection};
     use sha2::Sha256;
     use tempfile::tempdir;
 
     use super::{
-        extract_imprint_sections, init_database, mask_profanity, output_filename,
-        record_and_apply_stripe_event, reserve_conversion_usage, verify_stripe_signature, AppState,
+        account_access_email_allowed, account_logout, extract_imprint_sections, hash_token,
+        init_database, mask_profanity, output_filename, record_and_apply_stripe_event,
+        reserve_conversion_usage, verify_stripe_signature, AppState,
     };
 
     #[test]
@@ -3508,6 +3525,105 @@ mod tests {
         assert_eq!(first.unwrap().email, "buyer@example.de");
         assert!(repeated.is_none());
         assert_eq!(credits, 1);
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_the_server_side_session() {
+        let directory = tempdir().unwrap();
+        let db_path = directory.path().join("gaeb-web.sqlite3");
+        let state = Arc::new(AppState {
+            data_dir: directory.path().to_owned(),
+            db_path: db_path.clone(),
+            max_upload_bytes: 2 * 1024 * 1024,
+            paid_max_upload_bytes: 25 * 1024 * 1024,
+            retention_hours: 24,
+            diagnostic_retention_days: 30,
+            smtp: None,
+            http_client: reqwest::Client::new(),
+            imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tracking: Default::default(),
+            stripe: None,
+            offer: super::OfferConfig {
+                single_net_cents: 990,
+                pro_net_cents: 1900,
+                banner: None,
+            },
+            admin_token_hash: None,
+        });
+        init_database(&state).unwrap();
+        let raw_session = "session-secret";
+        Connection::open(&db_path)
+            .unwrap()
+            .execute(
+                "INSERT INTO billing_sessions(session_hash,email,expires_at,created_at) VALUES(?1,'buyer@example.de',?2,?3)",
+                params![
+                    hash_token(raw_session),
+                    (Utc::now() + ChronoDuration::days(30)).to_rfc3339(),
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("gaeb_session={raw_session}")).unwrap(),
+        );
+
+        let Ok(response) = account_logout(State(state), headers).await else {
+            panic!("logout failed");
+        };
+        let remaining: i64 = Connection::open(db_path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM billing_sessions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn account_email_throttle_applies_to_every_access_request() {
+        let directory = tempdir().unwrap();
+        let db_path = directory.path().join("gaeb-web.sqlite3");
+        let state = Arc::new(AppState {
+            data_dir: directory.path().to_owned(),
+            db_path: db_path.clone(),
+            max_upload_bytes: 2 * 1024 * 1024,
+            paid_max_upload_bytes: 25 * 1024 * 1024,
+            retention_hours: 24,
+            diagnostic_retention_days: 30,
+            smtp: None,
+            http_client: reqwest::Client::new(),
+            imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tracking: Default::default(),
+            stripe: None,
+            offer: super::OfferConfig {
+                single_net_cents: 990,
+                pro_net_cents: 1900,
+                banner: None,
+            },
+            admin_token_hash: None,
+        });
+        init_database(&state).unwrap();
+        let connection = Connection::open(db_path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO billing_accounts(email,updated_at,access_email_sent_at) VALUES('buyer@example.de',?1,?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+
+        assert!(!account_access_email_allowed(&connection, "buyer@example.de").unwrap());
+        assert!(!account_access_email_allowed(&connection, "unknown@example.de").unwrap());
+        connection
+            .execute(
+                "UPDATE billing_accounts SET access_email_sent_at=?1 WHERE email='buyer@example.de'",
+                [(Utc::now() - ChronoDuration::minutes(3)).to_rfc3339()],
+            )
+            .unwrap();
+        assert!(account_access_email_allowed(&connection, "buyer@example.de").unwrap());
     }
 
     #[test]

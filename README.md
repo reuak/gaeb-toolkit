@@ -205,6 +205,11 @@ rechtlich geprüft werden. Einwilligungen für Funktionsinformationen werden in
 `feature_subscriptions` bis zum Widerruf gespeichert; vor einem tatsächlichen
 Newsletterversand sollte ein Double-Opt-in-Verfahren ergänzt werden.
 
+Die häufige Vertauschung `geab.hawk-vision.de` wird durch Caddy dauerhaft auf
+`https://gaeb.hawk-vision.de` weitergeleitet. Dafür muss zusätzlich ein DNS-CNAME
+für `geab.hawk-vision.de` auf denselben öffentlich erreichbaren Server zeigen;
+ein CNAME allein erzeugt keine HTTP-Weiterleitung.
+
 ## Lizenz
 
 Der eigene Quellcode dieses Projekts steht unter der

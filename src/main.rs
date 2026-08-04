@@ -12,7 +12,11 @@ use gaeb_toolkit::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "gaeb-toolkit", version, about = "LV-PDFs strukturiert auslesen")]
+#[command(
+    name = "gaeb-toolkit",
+    version,
+    about = "LV-PDFs strukturiert auslesen"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -94,7 +98,10 @@ fn main() -> Result<()> {
             if boq.warnings.is_empty() {
                 eprintln!("Parsing abgeschlossen.");
             } else {
-                eprintln!("Parsing abgeschlossen mit {} Warnungen.", boq.warnings.len());
+                eprintln!(
+                    "Parsing abgeschlossen mit {} Warnungen.",
+                    boq.warnings.len()
+                );
                 for warning in &boq.warnings {
                     eprintln!("- {warning}");
                 }
@@ -138,7 +145,11 @@ fn derive_priced_x83(x84_path: &Path, x83_path: &Path) -> Result<()> {
             "http://www.gaeb.de/GAEB_DA_XML/DA83/3.3",
         )
         .replace("<DP>84</DP>", "<DP>83</DP>");
-    fs::write(x83_path, converted)
-        .with_context(|| format!("X83 mit Preisen konnte nicht geschrieben werden: {}", x83_path.display()))?;
+    fs::write(x83_path, converted).with_context(|| {
+        format!(
+            "X83 mit Preisen konnte nicht geschrieben werden: {}",
+            x83_path.display()
+        )
+    })?;
     Ok(())
 }

@@ -12,17 +12,17 @@ use crate::model::{BillOfQuantities, Node};
 /// benötigt zusätzlich `<Provis>WithoutTotal</Provis>` und bei pauschalen
 /// Positionen `<LumpSumItem>Yes</LumpSumItem>`, damit die Position nicht in die
 /// LV-Gesamtsumme eingeht, der EP aber erfasst werden kann.
-pub fn apply_provisional_flags(
-    path: impl AsRef<Path>,
-    boq: &BillOfQuantities,
-) -> Result<usize> {
+pub fn apply_provisional_flags(path: impl AsRef<Path>, boq: &BillOfQuantities) -> Result<usize> {
     let path = path.as_ref();
     let source = fs::read_to_string(path)
         .with_context(|| format!("GAEB-Datei konnte nicht gelesen werden: {}", path.display()))?;
     let (updated, count) = apply_to_xml(&source, boq)?;
     if count > 0 {
         fs::write(path, updated).with_context(|| {
-            format!("GAEB-Datei konnte nicht aktualisiert werden: {}", path.display())
+            format!(
+                "GAEB-Datei konnte nicht aktualisiert werden: {}",
+                path.display()
+            )
         })?;
     }
     Ok(count)
@@ -111,7 +111,8 @@ mod tests {
             ..Node::default()
         });
 
-        let xml = r#"<Item RNoPart="100"><Qty>1</Qty></Item><Item RNoPart="110"><Qty>1</Qty></Item>"#;
+        let xml =
+            r#"<Item RNoPart="100"><Qty>1</Qty></Item><Item RNoPart="110"><Qty>1</Qty></Item>"#;
         let (result, count) = apply_to_xml(xml, &boq).unwrap();
         assert_eq!(count, 1);
         assert!(result.contains(

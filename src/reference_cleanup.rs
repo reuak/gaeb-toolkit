@@ -56,7 +56,10 @@ fn repair_positions(positions: &mut Vec<Position>) {
 
 fn is_real_position(position: &Position) -> bool {
     position.quantity.is_some()
-        || position.unit.as_deref().is_some_and(|value| !value.trim().is_empty())
+        || position
+            .unit
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
         || position.unit_price.is_some()
         || position.total_price.is_some()
         || position.provisional
@@ -219,16 +222,15 @@ mod tests {
 
         repair_positions(&mut positions);
         assert_eq!(positions.len(), 1);
-        assert!(positions[0].long_text.contains("02.05.01.110 einschließlich Nebenarbeiten"));
+        assert!(positions[0]
+            .long_text
+            .contains("02.05.01.110 einschließlich Nebenarbeiten"));
     }
 
     #[test]
     fn joins_reference_in_sentence() {
         let mut positions = vec![
-            priced(
-                "02.02.01.060",
-                "Die Ausführung ist bereits in Position",
-            ),
+            priced("02.02.01.060", "Die Ausführung ist bereits in Position"),
             Position {
                 oz: "02.02.01.050".into(),
                 short_text: "beschrieben.".into(),

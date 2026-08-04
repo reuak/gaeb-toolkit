@@ -37,9 +37,8 @@ pub(crate) fn recover_placeholder_positions_from_text(
 
 fn recover_from_text(text: &str, boq: &mut BillOfQuantities) -> Result<usize> {
     let heading_re = Regex::new(r"^(?P<oz>\d{2}\.\d{2})\s+(?P<title>\S.*)$")?;
-    let position_re = Regex::new(
-        r"^(?P<a>\d{2})\.(?P<b>\d{2})\.__\.(?P<item>\d{3})(?:\s+(?P<rest>.*))?$",
-    )?;
+    let position_re =
+        Regex::new(r"^(?P<a>\d{2})\.(?P<b>\d{2})\.__\.(?P<item>\d{3})(?:\s+(?P<rest>.*))?$")?;
     let any_position_re = Regex::new(r"^\d{2}\.\d{2}(?:\.(?:\d{2}|__)){1,2}(?:\s|$)")?;
     let sum_re = Regex::new(r"^Summe\s+\d{2}\.\d{2}\b")?;
     let price_re = Regex::new(
@@ -60,7 +59,13 @@ fn recover_from_text(text: &str, boq: &mut BillOfQuantities) -> Result<usize> {
             }
 
             if let Some(caps) = position_re.captures(&line) {
-                finish_current(&mut current, &mut lines, page_number, &mut recovered, &price_re);
+                finish_current(
+                    &mut current,
+                    &mut lines,
+                    page_number,
+                    &mut recovered,
+                    &price_re,
+                );
                 let normalized_oz = format!("{}.{}.00.{}", &caps["a"], &caps["b"], &caps["item"]);
                 let mut position = Position {
                     oz: normalized_oz,
@@ -87,7 +92,13 @@ fn recover_from_text(text: &str, boq: &mut BillOfQuantities) -> Result<usize> {
             }
 
             if current.is_some() && (sum_re.is_match(&line) || any_position_re.is_match(&line)) {
-                finish_current(&mut current, &mut lines, page_number, &mut recovered, &price_re);
+                finish_current(
+                    &mut current,
+                    &mut lines,
+                    page_number,
+                    &mut recovered,
+                    &price_re,
+                );
                 continue;
             }
 
@@ -106,7 +117,13 @@ fn recover_from_text(text: &str, boq: &mut BillOfQuantities) -> Result<usize> {
     }
 
     let last_page = text.split('\u{000C}').count().max(1);
-    finish_current(&mut current, &mut lines, last_page, &mut recovered, &price_re);
+    finish_current(
+        &mut current,
+        &mut lines,
+        last_page,
+        &mut recovered,
+        &price_re,
+    );
 
     let mut count = 0usize;
     for position in recovered {
@@ -204,17 +221,20 @@ fn ensure_path<'a>(
 ) -> &'a mut Node {
     let oz = parts[..=index].join(".");
     let heading = headings.get(&oz);
-    let node_index = nodes.iter().position(|node| node.oz == oz).unwrap_or_else(|| {
-        nodes.push(Node {
-            oz: oz.clone(),
-            title: heading.map(|(title, _)| title.clone()).unwrap_or_default(),
-            level: index + 1,
-            page: Some(heading.map(|(_, page)| *page).unwrap_or(fallback_page)),
-            children: Vec::new(),
-            positions: Vec::new(),
+    let node_index = nodes
+        .iter()
+        .position(|node| node.oz == oz)
+        .unwrap_or_else(|| {
+            nodes.push(Node {
+                oz: oz.clone(),
+                title: heading.map(|(title, _)| title.clone()).unwrap_or_default(),
+                level: index + 1,
+                page: Some(heading.map(|(_, page)| *page).unwrap_or(fallback_page)),
+                children: Vec::new(),
+                positions: Vec::new(),
+            });
+            nodes.len() - 1
         });
-        nodes.len() - 1
-    });
 
     if nodes[node_index].title.is_empty() {
         if let Some((title, page)) = heading {
@@ -295,9 +315,18 @@ mod tests {
             children: vec![Node {
                 oz: "02.04".into(),
                 children: vec![
-                    Node { oz: "02.04.01".into(), ..Node::default() },
-                    Node { oz: "02.04.00".into(), ..Node::default() },
-                    Node { oz: "02.04.02".into(), ..Node::default() },
+                    Node {
+                        oz: "02.04.01".into(),
+                        ..Node::default()
+                    },
+                    Node {
+                        oz: "02.04.00".into(),
+                        ..Node::default()
+                    },
+                    Node {
+                        oz: "02.04.02".into(),
+                        ..Node::default()
+                    },
                 ],
                 ..Node::default()
             }],
