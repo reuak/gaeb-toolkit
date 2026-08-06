@@ -461,6 +461,9 @@ body.billing-active .trust-row span:first-child {
   gap: 18px;
   width: min(680px, 100%);
 }
+.pricing-grid.pro-only {
+  grid-template-columns: minmax(280px, 430px);
+}
 
 .price-card {
   padding: 24px;
@@ -508,6 +511,7 @@ body.billing-active .trust-row span:first-child {
 .checkout-form { display: grid; gap: 10px; margin-top: 18px; }
 .checkout-form label { display: grid; gap: 5px; }
 .checkout-form input { width: 100%; }
+.converter-card select { width:100%; padding:12px; border:1px solid var(--line); border-radius:10px; background:white; color:var(--ink); }
 .checkout-form .primary-button, .checkout-form .secondary-button { width: 100%; }
 .checkout-note { min-height: 1.4em; margin: 0; color: var(--muted); font-size: 0.82rem; }
 

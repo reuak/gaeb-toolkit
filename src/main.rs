@@ -8,7 +8,8 @@ use clap::{Parser, Subcommand};
 use gaeb_toolkit::{
     apply_provisional_flags,
     export::{write_json, write_master_xml},
-    inject_pdf_pngs, parse_pdf, write_x83, write_x83_priced, write_x84,
+    gaeb_document_to_boq, inject_pdf_pngs, parse_pdf, read_gaeb, write_gaeb_pdf, write_x83,
+    write_x83_priced, write_x84,
 };
 
 #[derive(Debug, Parser)]
@@ -43,6 +44,16 @@ enum Command {
         /// Nur nach manueller Prüfung verwenden.
         #[arg(long)]
         allow_conflicts: bool,
+    },
+    /// GAEB 90, GAEB DA 2000 oder GAEB DA XML lesen und neu ausgeben.
+    ConvertGaeb {
+        input: PathBuf,
+        /// Lesbare PDF-Datei schreiben.
+        #[arg(long)]
+        pdf: Option<PathBuf>,
+        /// Als modernes GAEB DA XML X83 schreiben.
+        #[arg(long)]
+        x83: Option<PathBuf>,
     },
 }
 
@@ -106,6 +117,24 @@ fn main() -> Result<()> {
                     eprintln!("- {warning}");
                 }
             }
+        }
+        Command::ConvertGaeb { input, pdf, x83 } => {
+            let document = read_gaeb(&input)?;
+            if pdf.is_none() && x83.is_none() {
+                anyhow::bail!("Mindestens --pdf oder --x83 angeben.");
+            }
+            if let Some(path) = pdf {
+                write_gaeb_pdf(&document, path)?;
+            }
+            if let Some(path) = x83 {
+                let boq = gaeb_document_to_boq(&document);
+                write_x83(&boq, path, false)?;
+            }
+            eprintln!(
+                "GAEB Phase {} mit {} Struktureinträgen gelesen.",
+                document.exchange_phase,
+                document.rows.len()
+            );
         }
     }
     Ok(())

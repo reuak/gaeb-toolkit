@@ -18,8 +18,8 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use gaeb_toolkit::{
-    apply_provisional_flags, inject_pdf_pngs, parse_pdf, read_gaeb_xml, write_gaeb_pdf, write_x83,
-    write_x84,
+    apply_provisional_flags, gaeb_document_to_boq, inject_pdf_pngs, parse_pdf, read_gaeb,
+    write_gaeb_pdf, write_x83, write_x84,
 };
 use hmac::{Hmac, Mac};
 use lettre::{
@@ -1748,6 +1748,7 @@ async fn gaeb_to_pdf(
     let mut gaeb = Vec::new();
     let mut email = String::new();
     let mut consent = false;
+    let mut output_format = "pdf".to_owned();
     while let Some(field) = multipart
         .next_field()
         .await
@@ -1769,12 +1770,23 @@ async fn gaeb_to_pdf(
             match name.as_str() {
                 "email" => email = value.trim().to_lowercase(),
                 "consent" => consent = matches!(value.as_str(), "true" | "on"),
+                "output_format" => output_format = value.trim().to_ascii_lowercase(),
                 _ => {}
             }
         }
     }
     if gaeb.is_empty() {
         return Err(ApiError::bad_request("Bitte eine GAEB-Datei auswählen."));
+    }
+    if !supported_gaeb_filename(&filename) {
+        return Err(ApiError::bad_request(
+            "Nicht unterstütztes Format. Bitte D81, D83, P81, P83 oder GAEB DA XML als X80 bis X86 beziehungsweise X89 auswählen.",
+        ));
+    }
+    if !matches!(output_format.as_str(), "pdf" | "x83") {
+        return Err(ApiError::bad_request(
+            "Bitte PDF oder X83 als Ausgabeformat wählen.",
+        ));
     }
     let access = billing_access_from_headers(&state, &headers).map_err(|_| ApiError::internal())?;
     let (account_email, tier, allowed_bytes, monthly_limit) =
@@ -1805,22 +1817,22 @@ async fn gaeb_to_pdf(
         None => ApiError::internal(),
     })?;
     let input_name = safe_filename(&filename);
-    let output_name = format!(
-        "{}.pdf",
-        safe_filename(
-            Path::new(&filename)
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("leistungsverzeichnis")
-        )
-    );
+    let output_extension = output_format.clone();
+    let output_name = output_filename_for(&filename, &output_extension);
     let bytes_result = task::spawn_blocking(move || -> Result<Vec<u8>> {
         let directory = tempfile::tempdir()?;
         let input = directory.path().join(input_name);
-        let output = directory.path().join("leistungsverzeichnis.pdf");
+        let output = directory
+            .path()
+            .join(format!("leistungsverzeichnis.{output_extension}"));
         std::fs::write(&input, gaeb)?;
-        let document = read_gaeb_xml(&input)?;
-        write_gaeb_pdf(&document, &output)?;
+        let document = read_gaeb(&input)?;
+        if output_extension == "x83" {
+            let boq = gaeb_document_to_boq(&document);
+            write_x83(&boq, &output, false)?;
+        } else {
+            write_gaeb_pdf(&document, &output)?;
+        }
         Ok(std::fs::read(output)?)
     })
     .await
@@ -1838,7 +1850,11 @@ async fn gaeb_to_pdf(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static("application/pdf"),
+        HeaderValue::from_static(if output_format == "x83" {
+            "application/xml; charset=utf-8"
+        } else {
+            "application/pdf"
+        }),
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
@@ -3113,6 +3129,31 @@ fn output_filename(input: &str) -> String {
     output_filename_for(input, "x83")
 }
 
+fn supported_gaeb_filename(filename: &str) -> bool {
+    Path::new(filename)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|extension| {
+            matches!(
+                extension.as_str(),
+                "d81"
+                    | "d83"
+                    | "p81"
+                    | "p83"
+                    | "x80"
+                    | "x81"
+                    | "x82"
+                    | "x83"
+                    | "x84"
+                    | "x85"
+                    | "x86"
+                    | "x89"
+                    | "xml"
+            )
+        })
+}
+
 fn output_filename_for(input: &str, extension: &str) -> String {
     let stem = Path::new(input)
         .file_stem()
@@ -3345,7 +3386,7 @@ mod tests {
     use super::{
         account_access_email_allowed, account_logout, extract_imprint_sections, hash_token,
         init_database, mask_profanity, output_filename, record_and_apply_stripe_event,
-        reserve_conversion_usage, verify_stripe_signature, AppState,
+        reserve_conversion_usage, supported_gaeb_filename, verify_stripe_signature, AppState,
     };
 
     #[test]
@@ -3384,6 +3425,27 @@ mod tests {
             output_filename("Angebot Außenputz Prüffläche.pdf"),
             "Angebot Aussenputz Pruefflaeche.x83"
         );
+    }
+
+    #[test]
+    fn accepts_supported_gaeb_extensions_case_insensitively() {
+        for filename in [
+            "altbestand.d81",
+            "altbestand.D83",
+            "da2000.p81",
+            "da2000.P83",
+            "lv.x80",
+            "lv.X83",
+            "angebot.x84",
+            "auftrag.x86",
+            "rechnung.x89",
+            "lv.xml",
+        ] {
+            assert!(supported_gaeb_filename(filename), "{filename}");
+        }
+        for filename in ["lv.p84", "lv.pdf", "lv", "lv.exe"] {
+            assert!(!supported_gaeb_filename(filename), "{filename}");
+        }
     }
 
     #[test]

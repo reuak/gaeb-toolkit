@@ -144,7 +144,10 @@ fn parse_bold_short_texts(layout: &str) -> Result<HashMap<(String, usize), Strin
     let page_re = Regex::new(r#"(?s)<page\b(?P<attrs>[^>]*)>(?P<body>.*?)</page>"#)?;
     let text_re = Regex::new(r#"(?s)<text\b(?P<attrs>[^>]*)>(?P<body>.*?)</text>"#)?;
     let tag_re = Regex::new(r#"<[^>]+>"#)?;
-    let position_re = Regex::new(r#"^(?P<oz>\d{2}\.\d{2}\.\d{2}\.\d{3})(?:\s+(?P<rest>.*))?$"#)?;
+    // OZ können je nach LV sehr unterschiedlich gegliedert sein, z. B.
+    // `24.220`, `1.1.10` oder `01.01.01.010`. Die Layoutauswertung muss
+    // dieselben Varianten erkennen wie der eigentliche Textparser.
+    let position_re = Regex::new(r#"^(?P<oz>\d{1,4}(?:\.\d{1,4}){1,3})\.?(?:\s+(?P<rest>.*))?$"#)?;
     let heading_re = Regex::new(r#"^\d{2}(?:\.\d{2}){0,2}\s+\S"#)?;
 
     let mut bold_fonts = HashSet::new();
@@ -414,6 +417,25 @@ mod tests {
         assert_eq!(
             result.get(&("01.01.01.010".into(), 1)).map(String::as_str),
             Some("Erste Zeile des Kurztexts\nzweite Zeile des Kurztexts")
+        );
+    }
+
+    #[test]
+    fn recognizes_bold_short_text_for_two_part_oz() {
+        let xml = r#"<pdf2xml>
+          <fontspec id="0" family="Arial-BoldMT"/>
+          <fontspec id="1" family="ArialMT"/>
+          <page number="3">
+            <text top="100" left="10" font="1">24.220 1,000 m²</text>
+            <text top="120" left="100" font="0">GK-Trockenbauwand</text>
+            <text top="140" left="100" font="0">100mm GKBI F90</text>
+            <text top="170" left="100" font="1">Liefern und montieren.</text>
+          </page>
+        </pdf2xml>"#;
+        let result = parse_bold_short_texts(xml).unwrap();
+        assert_eq!(
+            result.get(&("24.220".into(), 3)).map(String::as_str),
+            Some("GK-Trockenbauwand\n100mm GKBI F90")
         );
     }
 }

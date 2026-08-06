@@ -81,8 +81,10 @@ async function initializeBilling() {
     const response = await fetch("/api/billing/config");
     const config = await response.json();
     const money = (cents) => new Intl.NumberFormat("de-DE", {style:"currency",currency:"EUR"}).format(cents/100);
-    document.querySelector("#single-price").textContent = money(config.single_net_cents);
-    document.querySelector("#pro-price").textContent = money(config.pro_net_cents);
+    const singlePrice = document.querySelector("#single-price");
+    const proPrice = document.querySelector("#pro-price");
+    if (singlePrice) singlePrice.textContent = money(config.single_net_cents);
+    if (proPrice) proPrice.textContent = money(config.pro_net_cents);
     if (config.offer_banner) { const banner=document.querySelector("#offer-banner"); banner.textContent=config.offer_banner; banner.hidden=false; }
     for (const form of forms) {
       const button = form.querySelector("button");

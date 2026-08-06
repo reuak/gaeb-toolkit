@@ -10,9 +10,9 @@
     <meta name="theme-color" content="#f4f2e9" />
     <title>LV Konverter · PDF und GAEB lesbar austauschen</title>
     <link rel="icon" type="image/png" href="/assets/gaeb-konverter-icon.png?v=2" />
-    <link rel="stylesheet" href="/styles.css?v=12" />
+    <link rel="stylesheet" href="/styles.css?v=13" />
     <script src="/offer.js?v=2" defer></script>
-    <script src="/app.js?v=12" defer></script>
+    <script src="/app.js?v=13" defer></script>
     <script src="/consent.js" defer></script>
   </head>
   <body>
@@ -170,31 +170,19 @@
       <section class="paid-preview" id="preise">
         <div>
           <p class="eyebrow">Für größere Leistungsverzeichnisse</p>
-          <h2>Einzeln konvertieren oder regelmäßig Pro nutzen.</h2>
+          <h2>Mehr Leistung mit GAEB Pro.</h2>
           <p>
-            Der Einzelkauf eignet sich zum unverbindlichen Test. Ab dem dritten
-            bezahlten Dokument ist Pro günstiger.
+            Konvertieren Sie PDF und GAEB-Dateien in beide Richtungen. Das
+            gemeinsame Monatskontingent gilt unabhängig vom gewählten Dateiformat.
           </p>
         </div>
-        <div class="pricing-grid">
-          <article class="price-card">
-            <p class="step-label">Einzelkauf</p>
-            <p class="price-offer-label" id="single-offer-label">Einführungsangebot</p>
-            <p class="regular-price" id="single-regular-row">Regulär <del id="single-regular-price">9,90 €</del></p>
-            <h3><span id="single-price">2,99 €</span> <small>netto</small></h3>
-            <p>Ein Dokument bis 25 MB, X83/X84, Fehlerprotokoll und sieben Tage Download.</p>
-            <form class="checkout-form" data-offer="single">
-              <label><span>E-Mail</span><input type="email" name="email" required autocomplete="email" /></label>
-              <button class="secondary-button checkout-button" type="submit">Einzeln kaufen</button>
-              <p class="checkout-note" aria-live="polite"></p>
-            </form>
-          </article>
+        <div class="pricing-grid pro-only">
           <article class="price-card featured">
             <p class="step-label">Pro-Abo</p>
             <p class="price-offer-label" id="pro-offer-label">Einführungsangebot</p>
             <p class="regular-price" id="pro-regular-row">Regulär <del id="pro-regular-price">19,00 €</del></p>
             <h3><span id="pro-price">12,99 €</span> <small>netto / Monat</small></h3>
-            <p>100 Dokumente monatlich, bis 25 MB je Datei und insgesamt 2 GB Speicher.</p>
+            <p>100 Konvertierungen monatlich für PDF → GAEB und GAEB → PDF, bis 25 MB je Datei und insgesamt 2 GB Speicher.</p>
             <form class="checkout-form" data-offer="pro">
               <label><span>E-Mail</span><input type="email" name="email" required autocomplete="email" /></label>
               <button class="primary-button checkout-button" type="submit">Pro starten</button>

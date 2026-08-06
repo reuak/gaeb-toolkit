@@ -525,6 +525,7 @@ fn finish_position(
             .collect::<Vec<_>>()
             .join("\n");
     }
+    promote_short_long_text(&mut position);
     lines.clear();
 
     let mut hierarchy_parts = position.oz.split('.').collect::<Vec<_>>();
@@ -537,6 +538,95 @@ fn finish_position(
         position.page_from.unwrap_or_default(),
     );
     parent.positions.push(position);
+}
+
+/// Ein sehr kurzer vermeintlicher Langtext ist in tabellarischen PDFs meist
+/// die Fortsetzung der Kurzbezeichnung. Dasselbe gilt für eine kurze erste
+/// Detailzeile mit technischen Unterscheidungsmerkmalen wie `DN 25`, `F90`
+/// oder `5x2,5`. Nur dieses Fragment wandert in den Kurztext; der verbleibende
+/// Beschreibungstext bleibt ohne Doppelung im DetailTxt.
+fn promote_short_long_text(position: &mut Position) {
+    if position
+        .long_text
+        .trim()
+        .eq_ignore_ascii_case("Position entfällt")
+    {
+        return;
+    }
+
+    let detail_lines = position
+        .long_text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let total_words = position.long_text.split_whitespace().count();
+    let Some(first_line) = detail_lines.first() else {
+        return;
+    };
+    let first_words = first_line.split_whitespace().count();
+    let promote_all = (1..=3).contains(&total_words);
+    let promote_first_line =
+        (1..=4).contains(&first_words) && is_technical_short_fragment(first_line);
+    if !promote_all && !promote_first_line {
+        return;
+    }
+
+    let short_fragment = if promote_all {
+        position
+            .long_text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        (*first_line).to_owned()
+    };
+    if position.short_text.trim().is_empty() {
+        position.short_text = short_fragment;
+    } else if !position
+        .short_text
+        .trim()
+        .eq_ignore_ascii_case(&short_fragment)
+    {
+        position.short_text.push(' ');
+        position.short_text.push_str(&short_fragment);
+    }
+    position.long_text = if promote_all {
+        String::new()
+    } else {
+        detail_lines
+            .into_iter()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+}
+
+fn is_technical_short_fragment(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    let line_has_digit = lower.chars().any(|character| character.is_ascii_digit());
+    if line_has_digit && (lower.split_whitespace().any(|word| word == "dn") || lower.contains('ø'))
+    {
+        return true;
+    }
+
+    value.split_whitespace().any(|word| {
+        let normalized = word
+            .trim_matches(|character: char| !character.is_alphanumeric() && character != 'Ø')
+            .to_lowercase();
+        let has_digit = normalized
+            .chars()
+            .any(|character| character.is_ascii_digit());
+        has_digit
+            && (normalized.contains('x')
+                || normalized.contains('×')
+                || normalized.contains("mm")
+                || normalized.contains("cm")
+                || normalized.starts_with("dn")
+                || normalized.starts_with('ø')
+                || normalized.starts_with('f')
+                || normalized.starts_with("ei"))
+    })
 }
 
 fn ensure_hierarchy_from_position<'a>(
@@ -721,6 +811,30 @@ mod tests {
     }
 
     #[test]
+    fn moves_technical_variant_line_into_short_text_without_duplication() {
+        let text = "01 Trockenbau\n01.01 Wände\n01.01.010 GK-Trockenbauwand\n100mm GKBI F90\nLiefern und montieren gemäß Ausführungsplanung.\n1,000 m² ......................... .........................\n";
+        let boq = parse_text("trockenbau.pdf", text).unwrap();
+        let position = &boq.roots[0].children[0].positions[0];
+
+        assert_eq!(position.short_text, "GK-Trockenbauwand 100mm GKBI F90");
+        assert_eq!(
+            position.long_text,
+            "Liefern und montieren gemäß Ausführungsplanung."
+        );
+    }
+
+    #[test]
+    fn recognizes_common_technical_short_text_fragments() {
+        for fragment in ["100mm GKBI F90", "DN 25", "Cu-Rohr 18mm", "3x1,5", "5x2,5"] {
+            assert!(
+                is_technical_short_fragment(fragment),
+                "technisches Merkmal wurde nicht erkannt: {fragment}"
+            );
+        }
+        assert!(!is_technical_short_fragment("Liefern und montieren"));
+    }
+
+    #[test]
     fn parses_two_part_zueblin_positions_without_reclassifying_headings() {
         let text = "Leistungsverzeichnis ohne Preise\n\
 24. Trockenbauarbeiten\n\
@@ -873,8 +987,11 @@ Summe 3.8.1. Vorbereitende Arbeiten .........................
         assert_eq!(position.unit.as_deref(), Some("m2"));
         assert_eq!(position.unit_price, Some(Decimal::new(7184, 2)));
         assert_eq!(position.total_price, Some(Decimal::new(2859232, 2)));
-        assert_eq!(position.short_text, "GK-Doppelständerwand");
-        assert_eq!(position.long_text, "Einbauort: Obergeschoss");
+        assert_eq!(
+            position.short_text,
+            "GK-Doppelständerwand Einbauort: Obergeschoss"
+        );
+        assert!(position.long_text.is_empty());
     }
 
     #[test]
@@ -907,7 +1024,8 @@ Summe 3.8.1. Vorbereitende Arbeiten .........................
         let boq = parse_text("test.txt", text).unwrap();
         let first = &boq.roots[0].children[0].positions[0];
 
-        assert_eq!(first.long_text, "Beschreibung");
+        assert_eq!(first.short_text, "Leistung Beschreibung");
+        assert!(first.long_text.is_empty());
         assert!(!first.long_text.contains("Summe"));
         assert!(!first.long_text.contains("Druckdatum"));
         assert_eq!(boq.roots[0].children[1].positions.len(), 1);
@@ -955,8 +1073,31 @@ Summe 3.8.1. Vorbereitende Arbeiten .........................
         assert_eq!(position.unit.as_deref(), Some("lfm"));
         assert_eq!(position.unit_price, Some(Decimal::new(3870, 2)));
         assert_eq!(position.total_price, Some(Decimal::new(309600, 2)));
-        assert_eq!(position.short_text, "Bauzaun, Stahlrahmen mobil");
-        assert_eq!(position.long_text, "Beschreibung");
+        assert_eq!(
+            position.short_text,
+            "Bauzaun, Stahlrahmen mobil Beschreibung"
+        );
+        assert!(position.long_text.is_empty());
+    }
+
+    #[test]
+    fn promotes_one_to_three_long_text_words_into_short_text() {
+        let text = "01.01.01.030 Hauptbezeichnung\nkurzer Zusatz\n1,000 St ......................... .........................\n";
+        let boq = parse_text("test.txt", text).unwrap();
+        let position = first_position(&boq);
+
+        assert_eq!(position.short_text, "Hauptbezeichnung kurzer Zusatz");
+        assert!(position.long_text.is_empty());
+    }
+
+    #[test]
+    fn keeps_four_or_more_words_in_long_text() {
+        let text = "01.01.01.030 Hauptbezeichnung\ndieser Text bleibt lang\n1,000 St ......................... .........................\n";
+        let boq = parse_text("test.txt", text).unwrap();
+        let position = first_position(&boq);
+
+        assert_eq!(position.short_text, "Hauptbezeichnung");
+        assert_eq!(position.long_text, "dieser Text bleibt lang");
     }
 
     #[test]
@@ -966,8 +1107,8 @@ Summe 3.8.1. Vorbereitende Arbeiten .........................
         let position = first_position(&boq);
         assert_eq!(position.page_from, Some(1));
         assert_eq!(position.page_to, Some(2));
-        assert_eq!(position.short_text, "Bauzaun-Tor");
-        assert_eq!(position.long_text, "vorhalten und unterhalten");
+        assert_eq!(position.short_text, "Bauzaun-Tor vorhalten und unterhalten");
+        assert!(position.long_text.is_empty());
     }
 
     #[test]

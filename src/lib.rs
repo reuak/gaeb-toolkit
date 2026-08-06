@@ -4,6 +4,8 @@ use anyhow::{bail, Context};
 
 mod breakdown;
 pub mod export;
+pub mod gaeb2000;
+pub mod gaeb90;
 pub mod gaeb_reader;
 pub mod inline_png;
 pub mod model;
@@ -19,7 +21,23 @@ pub mod reference_cleanup;
 pub mod title_cleanup;
 pub mod x83;
 
+pub use gaeb2000::read_gaeb_2000;
+pub use gaeb90::{gaeb_document_to_boq, read_gaeb_90};
 pub use gaeb_reader::{read_gaeb_xml, write_gaeb_pdf, GaebDocument, GaebItem, GaebRow};
+
+pub fn read_gaeb(path: impl AsRef<Path>) -> anyhow::Result<GaebDocument> {
+    let path = path.as_ref();
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("d81" | "d83") => read_gaeb_90(path),
+        Some("p81" | "p83") => read_gaeb_2000(path),
+        _ => read_gaeb_xml(path),
+    }
+}
 pub use inline_png::inject_pdf_pngs;
 pub use model::{BillOfQuantities, Node, Position};
 pub use parser::parse_text;

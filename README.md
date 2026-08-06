@@ -83,7 +83,9 @@ Die erste Webversion bietet:
 - Kontaktdaten und Einwilligung
 - drei kostenlose Konvertierungen pro E-Mail und Monat, jeweils bis 50 Positionen
 - asynchrone PDF-zu-X83-Konvertierung
-- direkte GAEB-DA-XML-X81-bis-X86-zu-PDF-Lesefassung ohne Dokumentenspeicherung
+- direkte GAEB-90-D81/D83-, GAEB-DA-2000-P81/P83- und
+  GAEB-DA-XML-X80-bis-X86/X89-zu-PDF-Lesefassung ohne Dokumentenspeicherung
+- Modernisierung von D81/D83 und P81/P83 nach GAEB DA XML X83
 - gemeinsames Monatskontingent für beide Richtungen: 3 kostenlos, 100 mit aktivem Pro-Abo
 - geschützten Download-Link
 - automatische Löschung nach 24 Stunden

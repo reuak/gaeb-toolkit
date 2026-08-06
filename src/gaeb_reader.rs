@@ -152,11 +152,16 @@ pub fn read_gaeb_xml(path: impl AsRef<Path>) -> Result<GaebDocument> {
     if !saw_gaeb {
         bail!("Die Datei ist kein unterstütztes GAEB-DA-XML-Dokument.");
     }
-    if !document
+    let has_items = document
         .rows
         .iter()
-        .any(|row| matches!(row, GaebRow::Item(_)))
-    {
+        .any(|row| matches!(row, GaebRow::Item(_)));
+    let is_structured_phase_81 = document.exchange_phase == "81"
+        && document
+            .rows
+            .iter()
+            .any(|row| matches!(row, GaebRow::Category { .. }));
+    if !has_items && !is_structured_phase_81 {
         bail!("Die GAEB-Datei enthält keine lesbaren LV-Positionen.");
     }
     Ok(document)
@@ -508,5 +513,24 @@ mod tests {
 
         write_gaeb_pdf(&document, &output).unwrap();
         assert!(fs::metadata(output).unwrap().len() > 1_000);
+    }
+
+    #[test]
+    fn accepts_structured_x81_template_without_positions() {
+        let directory = tempdir().unwrap();
+        let input = directory.path().join("template.x81");
+        fs::write(
+            &input,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<GAEB xmlns="http://www.gaeb.de/GAEB_DA_XML/DA81/3.3">
+  <Award><DP>81</DP><BoQ><BoQBody>
+    <BoQCtgy RNoPart="01"><LblTx><p><span>Vorlage</span></p></LblTx></BoQCtgy>
+  </BoQBody></BoQ></Award>
+</GAEB>"#,
+        )
+        .unwrap();
+        let document = read_gaeb_xml(&input).unwrap();
+        assert_eq!(document.exchange_phase, "81");
+        assert!(matches!(document.rows[0], GaebRow::Category { .. }));
     }
 }

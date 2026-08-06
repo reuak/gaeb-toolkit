@@ -1,5 +1,94 @@
-const form=document.querySelector("#gaeb-reader-form"),input=document.querySelector("#gaeb"),meta=document.querySelector("#gaeb-file-meta"),note=document.querySelector("#gaeb-note");let limit=2*1024*1024;
-document.querySelector("#year").textContent=new Date().getFullYear();
-async function init(){try{const r=await fetch("/api/billing/status"),s=await r.json();if(s.signed_in&&s.plan==="pro"){limit=s.max_upload_bytes;document.body.classList.add("billing-active","billing-pro");document.querySelector("#free-fields").hidden=true;document.querySelectorAll("#free-fields input").forEach(i=>i.required=false);document.querySelector("#gaeb-kicker").textContent="GAEB Pro · Zugang aktiv";document.querySelector("#gaeb-limit").textContent="Bis 25 MB pro Datei";document.querySelector("#gaeb-volume").textContent="100 Konvertierungen pro Monat · beide Richtungen";meta.textContent="DA XML, maximal 25 MB";note.textContent="Diese Konvertierung zählt zu Ihrem gemeinsamen Pro-Monatskontingent.";}else{document.querySelector("#free-fields input[type=email]").required=true;document.querySelector("#free-fields input[type=checkbox]").required=true;}}catch(_){note.textContent="Kontostatus konnte nicht geladen werden.";}}init();
-input.addEventListener("change",()=>{const f=input.files[0];if(f){document.querySelector("#gaeb-file-title").textContent=f.name;meta.textContent=`${(f.size/1024/1024).toFixed(2)} MB`;}});
-form.addEventListener("submit",async e=>{e.preventDefault();const file=input.files[0];if(!file)return;if(file.size>limit){meta.textContent=`Die Datei ist größer als ${limit/1024/1024} MB.`;return;}const button=form.querySelector("button[type=submit]");button.disabled=true;note.textContent="PDF wird erstellt …";try{const r=await fetch("/api/gaeb-to-pdf",{method:"POST",body:new FormData(form)});if(!r.ok){const d=await r.json();throw new Error(d.error||"Konvertierung fehlgeschlagen.");}const url=URL.createObjectURL(await r.blob()),a=document.createElement("a");a.href=url;a.download=`${file.name.replace(/\.[^.]+$/,"")||"leistungsverzeichnis"}.pdf`;a.click();URL.revokeObjectURL(url);note.textContent="PDF wurde erstellt und heruntergeladen.";}catch(error){note.textContent=error.message;}finally{button.disabled=false;}});
+const form = document.querySelector("#gaeb-reader-form");
+const input = document.querySelector("#gaeb");
+const meta = document.querySelector("#gaeb-file-meta");
+const note = document.querySelector("#gaeb-note");
+const outputSelect = document.querySelector("#gaeb-output-format");
+const allowedExtensions = new Set(["d81", "d83", "p81", "p83", "x80", "x81", "x82", "x83", "x84", "x85", "x86", "x89", "xml"]);
+let limit = 2 * 1024 * 1024;
+
+document.querySelector("#year").textContent = new Date().getFullYear();
+
+function extensionOf(file) {
+  return file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "";
+}
+
+async function init() {
+  try {
+    const response = await fetch("/api/billing/status");
+    const status = await response.json();
+    if (status.signed_in && status.plan === "pro") {
+      limit = status.max_upload_bytes;
+      document.body.classList.add("billing-active", "billing-pro");
+      document.querySelector("#free-fields").hidden = true;
+      document.querySelectorAll("#free-fields input").forEach((element) => {
+        element.required = false;
+      });
+      document.querySelector("#gaeb-kicker").textContent = "GAEB Pro · Zugang aktiv";
+      document.querySelector("#gaeb-limit").textContent = "Bis 25 MB pro Datei";
+      document.querySelector("#gaeb-volume").textContent = "100 Konvertierungen pro Monat · beide Richtungen";
+      meta.textContent = "GAEB 90: D81/D83 · DA 2000: P81/P83 · DA XML: X80–X86, X89 · maximal 25 MB";
+      note.textContent = "Diese Konvertierung zählt zu Ihrem gemeinsamen Pro-Monatskontingent.";
+      const upsell = document.querySelector("#gaeb-pro-upsell");
+      if (upsell) upsell.hidden = true;
+    } else {
+      document.querySelector("#free-fields input[type=email]").required = true;
+      document.querySelector("#free-fields input[type=checkbox]").required = true;
+    }
+  } catch (_) {
+    note.textContent = "Kontostatus konnte nicht geladen werden.";
+  }
+}
+
+input.addEventListener("change", () => {
+  const file = input.files[0];
+  if (!file) return;
+  const extension = extensionOf(file);
+  document.querySelector("#gaeb-file-title").textContent = file.name;
+  meta.textContent = allowedExtensions.has(extension)
+    ? `${(file.size / 1024 / 1024).toFixed(2)} MB · ${extension.toUpperCase()}`
+    : "Nicht unterstütztes Format. Bitte D81, D83, P81, P83, X80–X86, X89 oder XML wählen.";
+});
+
+outputSelect.addEventListener("change", () => {
+  const label = outputSelect.value === "x83" ? "Als modernes X83 herunterladen" : "GAEB als PDF herunterladen";
+  form.querySelector("button[type=submit] span").textContent = label;
+});
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const file = input.files[0];
+  if (!file) return;
+  if (!allowedExtensions.has(extensionOf(file))) {
+    note.textContent = "Bitte eine GAEB-Datei als D81, D83, P81, P83, X80–X86, X89 oder XML auswählen.";
+    return;
+  }
+  if (file.size > limit) {
+    meta.textContent = `Die Datei ist größer als ${limit / 1024 / 1024} MB.`;
+    return;
+  }
+
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  note.textContent = "PDF wird erstellt …";
+  try {
+    const response = await fetch("/api/gaeb-to-pdf", { method: "POST", body: new FormData(form) });
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.error || "Konvertierung fehlgeschlagen.");
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement("a");
+    link.href = url;
+    const outputFormat = new FormData(form).get("output_format") === "x83" ? "x83" : "pdf";
+    link.download = `${file.name.replace(/\.[^.]+$/, "") || "leistungsverzeichnis"}.${outputFormat}`;
+    link.click();
+    URL.revokeObjectURL(url);
+    note.textContent = "PDF wurde erstellt und heruntergeladen.";
+  } catch (error) {
+    note.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+init();
