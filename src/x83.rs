@@ -11,6 +11,7 @@ use regex::Regex;
 use crate::{
     breakdown::{from_boq, level_label},
     model::{BillOfQuantities, Node, Position},
+    CONVERTER_BRANDING, CONVERTER_NAME,
 };
 
 const NS: &str = "http://www.gaeb.de/GAEB_DA_XML/DA83/3.3";
@@ -119,8 +120,8 @@ fn write_gaeb_info<W: std::io::Write>(writer: &mut Writer<W>) -> Result<()> {
     write_text(writer, "VersDate", "2021-05")?;
     write_text(writer, "Date", &now.format("%Y-%m-%d").to_string())?;
     write_text(writer, "Time", &now.format("%H:%M:%S").to_string())?;
-    write_text(writer, "ProgSystem", "gaeb-toolkit")?;
-    write_text(writer, "ProgName", "gaeb-toolkit")?;
+    write_text(writer, "ProgSystem", CONVERTER_NAME)?;
+    write_text(writer, "ProgName", CONVERTER_BRANDING)?;
     write_text(writer, "Certific", "not certified")?;
     writer.write_event(Event::End(BytesEnd::new("GAEBInfo")))?;
     Ok(())
@@ -387,8 +388,12 @@ mod tests {
         let xml = fs::read_to_string(path).unwrap();
         assert!(xml.contains("http://www.gaeb.de/GAEB_DA_XML/DA83/3.3"));
         assert!(xml.contains("<DP>83</DP>"));
+        assert!(xml.contains("<ProgSystem>GAEB.hawkvision.de</ProgSystem>"));
+        assert!(xml.contains("<ProgName>Umgewandelt mit GAEB.hawkvision.de</ProgName>"));
         assert!(xml.contains("RNoPart=\"040\""));
         assert!(xml.contains("<Qty>12.5</Qty>"));
+        assert!(xml.contains("<span>Kurztext</span>"));
+        assert!(xml.contains("<span>Langtext</span>"));
         assert!(!xml.contains("<UP>"));
     }
 

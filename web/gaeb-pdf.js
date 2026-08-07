@@ -3,6 +3,7 @@ const input = document.querySelector("#gaeb");
 const meta = document.querySelector("#gaeb-file-meta");
 const note = document.querySelector("#gaeb-note");
 const outputSelect = document.querySelector("#gaeb-output-format");
+const checkoutForm = document.querySelector("#gaeb-pro-checkout");
 const allowedExtensions = new Set(["d81", "d83", "p81", "p83", "x80", "x81", "x82", "x83", "x84", "x85", "x86", "x89", "xml"]);
 let limit = 2 * 1024 * 1024;
 
@@ -30,6 +31,12 @@ async function init() {
       note.textContent = "Diese Konvertierung zählt zu Ihrem gemeinsamen Pro-Monatskontingent.";
       const upsell = document.querySelector("#gaeb-pro-upsell");
       if (upsell) upsell.hidden = true;
+      document.querySelector("#gaeb-pro-card")?.classList.add("is-current");
+      const checkoutButton = checkoutForm?.querySelector("button");
+      if (checkoutButton) {
+        checkoutButton.disabled = true;
+        checkoutButton.textContent = "GAEB Pro ist aktiv";
+      }
     } else {
       document.querySelector("#free-fields input[type=email]").required = true;
       document.querySelector("#free-fields input[type=checkbox]").required = true;
@@ -37,6 +44,42 @@ async function init() {
   } catch (_) {
     note.textContent = "Kontostatus konnte nicht geladen werden.";
   }
+}
+
+async function initializeCheckout() {
+  if (!checkoutForm) return;
+  const button = checkoutForm.querySelector("button");
+  const checkoutNote = checkoutForm.querySelector(".checkout-note");
+  try {
+    const response = await fetch("/api/billing/config");
+    const config = await response.json();
+    if (!config.enabled) {
+      button.disabled = true;
+      checkoutNote.textContent = "Der Pro-Checkout wird in Kürze freigeschaltet.";
+    }
+  } catch (_) {
+    button.disabled = true;
+    checkoutNote.textContent = "Der Bezahlbereich konnte nicht geladen werden.";
+  }
+
+  checkoutForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    button.disabled = true;
+    checkoutNote.textContent = "Sicherer Stripe-Checkout wird geöffnet …";
+    try {
+      const response = await fetch("/api/billing/checkout", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ offer: "pro", email: new FormData(checkoutForm).get("email") }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Checkout konnte nicht geöffnet werden.");
+      window.location.assign(data.url);
+    } catch (error) {
+      checkoutNote.textContent = error.message;
+      button.disabled = false;
+    }
+  });
 }
 
 input.addEventListener("change", () => {
@@ -92,3 +135,4 @@ form.addEventListener("submit", async (event) => {
 });
 
 init();
+initializeCheckout();

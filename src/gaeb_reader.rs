@@ -7,10 +7,13 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use printpdf::{
-    BuiltinFont, IndirectFontRef, Mm, PdfDocument, PdfDocumentReference, PdfLayerReference,
+    BuiltinFont, Color, Greyscale, IndirectFontRef, Mm, PdfDocument, PdfDocumentReference,
+    PdfLayerReference,
 };
 use quick_xml::{events::Event, Reader};
 use rust_decimal::Decimal;
+
+use crate::CONVERTER_BRANDING;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GaebDocument {
@@ -423,6 +426,9 @@ impl PdfRenderer {
     }
 
     fn footer(&self) {
+        let layer: PdfLayerReference = self.pdf.get_page(self.page).get_layer(self.layer);
+        layer.set_fill_color(Color::Greyscale(Greyscale::new(0.48, None)));
+        layer.use_text(CONVERTER_BRANDING, 6.5, Mm(15.0), Mm(10.0), &self.regular);
         self.text(
             174.0,
             10.0,

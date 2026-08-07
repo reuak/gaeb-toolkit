@@ -11,7 +11,7 @@ use rust_decimal::Decimal;
 use crate::{
     breakdown::{from_boq, level_label},
     model::{BillOfQuantities, Node, Position},
-    x83_conflicts,
+    x83_conflicts, CONVERTER_BRANDING, CONVERTER_NAME,
 };
 
 #[derive(Clone, Copy)]
@@ -156,8 +156,8 @@ fn write_gaeb_info<W: std::io::Write>(writer: &mut Writer<W>) -> Result<()> {
     write_text(writer, "VersDate", "2021-05")?;
     write_text(writer, "Date", &now.format("%Y-%m-%d").to_string())?;
     write_text(writer, "Time", &now.format("%H:%M:%S").to_string())?;
-    write_text(writer, "ProgSystem", "gaeb-toolkit")?;
-    write_text(writer, "ProgName", "gaeb-toolkit")?;
+    write_text(writer, "ProgSystem", CONVERTER_NAME)?;
+    write_text(writer, "ProgName", CONVERTER_BRANDING)?;
     write_text(writer, "Certific", "not certified")?;
     writer.write_event(Event::End(BytesEnd::new("GAEBInfo")))?;
     Ok(())
@@ -415,6 +415,7 @@ mod tests {
         let xml = fs::read_to_string(path).unwrap();
         assert!(xml.contains("DA84/3.3"));
         assert!(xml.contains("<DP>84</DP>"));
+        assert!(xml.contains("<ProgName>Umgewandelt mit GAEB.hawkvision.de</ProgName>"));
         assert!(xml.contains("<UP>10</UP>"));
         assert!(xml.contains("<IT>25</IT>"));
     }
@@ -427,6 +428,7 @@ mod tests {
         let xml = fs::read_to_string(path).unwrap();
         assert!(xml.contains("DA83/3.3"));
         assert!(xml.contains("<DP>83</DP>"));
+        assert!(xml.contains("<ProgName>Umgewandelt mit GAEB.hawkvision.de</ProgName>"));
         assert!(xml.contains("<UP>10</UP>"));
     }
 }

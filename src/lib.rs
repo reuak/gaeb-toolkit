@@ -2,6 +2,9 @@ use std::{collections::HashSet, fs, path::Path, process::Command};
 
 use anyhow::{bail, Context};
 
+pub const CONVERTER_BRANDING: &str = "Umgewandelt mit GAEB.hawkvision.de";
+pub const CONVERTER_NAME: &str = "GAEB.hawkvision.de";
+
 mod breakdown;
 pub mod export;
 pub mod gaeb2000;
