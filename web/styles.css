@@ -95,6 +95,9 @@ h1 {
   line-height: 0.98;
   letter-spacing: -0.055em;
 }
+.sales-title {
+  font-size: clamp(43px, 5.4vw, 72px);
+}
 .intro {
   max-width: 600px;
   margin: 30px 0;
@@ -102,6 +105,16 @@ h1 {
   font-size: 18px;
   line-height: 1.68;
 }
+.sales-highlight {
+  padding: 16px 18px;
+  border-left: 4px solid var(--lime);
+  border-radius: 0 14px 14px 0;
+  background: rgba(231, 240, 229, 0.72);
+  color: var(--ink);
+  font-weight: 650;
+  line-height: 1.5;
+}
+.sales-highlight strong { color: var(--green-dark); }
 .trust-row {
   display: flex;
   flex-wrap: wrap;
@@ -620,9 +633,11 @@ footer nav { display: flex; flex-wrap: wrap; gap: 18px; }
 @media (max-width: 580px) {
   .site-header, .hero, .how-it-works, .gaeb-reader, .paid-preview, .legal-panel, footer { width: min(100% - 24px, 1180px); }
   .header-note { display: none; }
-  .hero { margin-bottom: 65px; }
+  .hero { margin-bottom: 65px; gap: 16px; }
   h1 { font-size: 47px; }
-  .intro { font-size: 16px; }
+  .sales-title { font-size: 36px; line-height: 1.02; }
+  .intro { margin-top: 15px; margin-bottom: 15px; font-size: 15px; }
+  .sales-highlight { padding: 11px 13px; }
   .converter-card { padding: 23px 17px; border-radius: 20px; }
   .field-grid { grid-template-columns: 1fr; }
   .how-it-works ol { grid-template-columns: 1fr; }
