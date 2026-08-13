@@ -10,7 +10,7 @@
     <meta name="theme-color" content="#f4f2e9" />
     <title>LV Konverter · PDF und GAEB lesbar austauschen</title>
     <link rel="icon" type="image/png" href="/assets/gaeb-konverter-icon.png?v=2" />
-    <link rel="stylesheet" href="/styles.css?v=15" />
+    <link rel="stylesheet" href="/styles.css?v=16" />
     <script src="/offer.js?v=2" defer></script>
     <script src="/app.js?v=14" defer></script>
     <script src="/consent.js?v=2" defer></script>
@@ -199,8 +199,9 @@
             gemeinsame Monatskontingent gilt unabhängig vom gewählten Dateiformat.
           </p>
         </div>
-        <div class="pricing-grid pro-only">
-          <article class="price-card featured">
+        <div class="offer-options">
+          <div class="pricing-grid pro-only">
+            <article class="price-card featured">
             <p class="step-label">Pro-Abo</p>
             <p class="price-offer-label" id="pro-offer-label">Einführungsangebot</p>
             <p class="regular-price" id="pro-regular-row">Regulär <del id="pro-regular-price">19,00 €</del></p>
@@ -211,7 +212,19 @@
               <button class="primary-button checkout-button" type="submit">Pro starten</button>
               <p class="checkout-note" aria-live="polite"></p>
             </form>
-          </article>
+            </article>
+          </div>
+          <aside class="enterprise-note">
+            <div>
+              <p class="step-label">REST-API für B2B</p>
+              <h3>GAEB-Konvertierung direkt in Ihre Systeme integrieren.</h3>
+              <p>
+                Großkunden können den Konverter auf Anfrage per gesichertem
+                REST-Webdienst an Dolibarr, ERP-Systeme oder eigene Anwendungen anbinden.
+              </p>
+            </div>
+            <a class="enterprise-link" href="/support.html">B2B-Anbindung anfragen →</a>
+          </aside>
         </div>
       </section>
       <section class="reviews-section" id="bewertungen" hidden><p class="eyebrow">Verifizierte Kundenstimmen</p><h2>Erfahrungen nach erfolgreicher Konvertierung.</h2><div class="reviews-grid" id="public-reviews"></div></section>

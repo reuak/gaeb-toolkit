@@ -278,11 +278,15 @@ Mehrere Tokens werden kommasepariert eingetragen:
 INTEGRATION_API_KEYS=TOKEN_DOLIBARR,TOKEN_WEITERER_CLIENT
 ```
 
-Danach muss der Anwendungscontainer neu erstellt werden:
+Nach einer Änderung der Server-`.env` muss nur der Anwendungscontainer neu
+erstellt werden. Ein erneuter Image-Build ist dafür nicht notwendig:
 
 ```bash
-docker compose up -d --build --force-recreate app
+./scripts/reload-env.sh
 ```
+
+Das Skript startet ausschließlich den Dienst `app` neu. Ein bereits vorhandener
+nginx-Reverse-Proxy oder der optionale Caddy-Dienst wird nicht verändert.
 
 Ein zufälliger Schlüssel kann erzeugt werden mit:
 

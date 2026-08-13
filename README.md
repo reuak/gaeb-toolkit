@@ -116,6 +116,15 @@ Anschließend auf dem Server starten:
 docker compose up -d --build
 ```
 
+Wurde später ausschließlich die Server-`.env` geändert, ist kein erneuter Build
+notwendig. Das Hilfsskript validiert die Konfiguration und erstellt nur den
+App-Container neu; Caddy beziehungsweise ein vorhandener nginx-Reverse-Proxy
+bleibt unberührt:
+
+```bash
+./scripts/reload-env.sh
+```
+
 Die Domain muss mit einem A- beziehungsweise AAAA-Eintrag auf den Server zeigen.
 Caddy beantragt das TLS-Zertifikat automatisch. Die dauerhaften Auftragsdaten
 liegen im Docker-Volume `gaeb-data`.

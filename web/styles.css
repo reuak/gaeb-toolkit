@@ -520,6 +520,7 @@ body.billing-active .trust-row span:first-child {
 .pricing-grid.pro-only {
   grid-template-columns: minmax(280px, 430px);
 }
+.offer-options { width: min(680px, 100%); }
 
 .price-card {
   padding: 24px;
@@ -570,11 +571,29 @@ body.billing-active .trust-row span:first-child {
 .converter-card select { width:100%; padding:12px; border:1px solid var(--line); border-radius:10px; background:white; color:var(--ink); }
 .checkout-form .primary-button, .checkout-form .secondary-button { width: 100%; }
 .checkout-note { min-height: 1.4em; margin: 0; color: var(--muted); font-size: 0.82rem; }
+.enterprise-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  width: min(680px, 100%);
+  margin-top: 14px;
+  padding: 18px 20px;
+  border: 1px solid rgba(183, 234, 92, 0.34);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.enterprise-note h3 { margin: 3px 0 5px; color: white; font-size: 1.05rem; }
+.enterprise-note p { margin: 0; color: rgba(255, 255, 255, 0.76); font-size: 0.86rem; }
+.enterprise-note .step-label { color: var(--lime); }
+.enterprise-link { flex: 0 0 auto; color: white; font-size: 0.86rem; font-weight: 800; }
+.enterprise-link:hover { color: var(--lime); }
 
 @media (max-width: 760px) {
   .pricing-grid { grid-template-columns: 1fr; }
   .billing-banner { grid-template-columns: 34px 1fr; }
   .billing-credit { grid-column: 2; width: fit-content; }
+  .enterprise-note { align-items: flex-start; flex-direction: column; }
 }
 .paid-preview > div { max-width: 690px; }
 .paid-preview .eyebrow { color: var(--lime); }
