@@ -217,12 +217,13 @@ internen Arbeitsabläufen verwendet werden. Die maximale Dateigröße entspricht
 
 ### Stripe im Testmodus
 
-Im Stripe-Dashboard werden zwei Preise angelegt: `9,90 EUR` als Einmalzahlung
-und `19,00 EUR` monatlich als Abonnement. Die zugehörigen `price_...`-IDs und
-der Testschlüssel `sk_test_...` werden ausschließlich in der Server-`.env`
-eingetragen. Der Webhook zeigt auf:
+Im Stripe-Dashboard wird für das sichtbare Pro-Angebot ein monatlich
+wiederkehrender Preis angelegt. Seine `price_...`-ID und der Testschlüssel
+`sk_test_...` werden ausschließlich in der Server-`.env` eingetragen. Die
+`STRIPE_SINGLE_PRICE_ID` ist optional, solange Einzelkäufe nicht angeboten
+werden. Der Webhook zeigt auf:
 
-Beide Preise werden als Nettopreise mit exklusivem Steuerverhalten angelegt.
+Der Preis wird als Nettopreis mit exklusivem Steuerverhalten angelegt.
 Vor einem Live-Test müssen in Stripe Tax die Unternehmensanschrift und die
 erforderlichen Steuerregistrierungen konfiguriert sein; Checkout ermittelt die
 Steuer anhand von Rechnungsanschrift und gegebenenfalls USt-IdNr.

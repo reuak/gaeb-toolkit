@@ -344,7 +344,7 @@ body.billing-active .trust-row span:first-child {
   transition: background 160ms ease, transform 160ms ease;
 }
 .primary-button:hover, .download-button:hover { background: var(--green-dark); transform: translateY(-1px); }
-.primary-button:disabled { cursor: wait; opacity: 0.65; }
+.primary-button:disabled { cursor: not-allowed; opacity: 0.65; }
 .primary-button[aria-busy="true"] { cursor: progress; }
 .secondary-button { margin-top: 10px; background: #edf0eb; color: var(--ink); }
 .form-note { margin: 10px 0 0; color: #78847f; text-align: center; font-size: 10px; }

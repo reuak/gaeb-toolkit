@@ -73,7 +73,7 @@ struct OfferConfig {
 struct StripeConfig {
     secret_key: String,
     webhook_secret: String,
-    single_price_id: String,
+    single_price_id: Option<String>,
     pro_price_id: String,
     public_base_url: String,
 }
@@ -812,8 +812,13 @@ async fn create_checkout(
         ));
     }
     let (price_id, mode) = match request.offer.as_str() {
-        "single" => (&stripe.single_price_id, "payment"),
-        "pro" => (&stripe.pro_price_id, "subscription"),
+        "single" => (
+            stripe.single_price_id.as_deref().ok_or_else(|| {
+                ApiError::unavailable("Einzelkäufe werden derzeit nicht angeboten.")
+            })?,
+            "payment",
+        ),
+        "pro" => (stripe.pro_price_id.as_str(), "subscription"),
         _ => return Err(ApiError::bad_request("Unbekanntes Angebot.")),
     };
     let success_url = format!(
@@ -823,7 +828,7 @@ async fn create_checkout(
     let cancel_url = format!("{}/?checkout=cancelled#preise", stripe.public_base_url);
     let mut checkout_fields = vec![
         ("mode", mode),
-        ("line_items[0][price]", price_id.as_str()),
+        ("line_items[0][price]", price_id),
         ("line_items[0][quantity]", "1"),
         ("customer_email", email.as_str()),
         ("success_url", success_url.as_str()),
@@ -3505,12 +3510,14 @@ fn valid_email(value: &str) -> bool {
 fn stripe_config() -> Option<StripeConfig> {
     let secret_key = required_env("STRIPE_SECRET_KEY")?;
     let webhook_secret = required_env("STRIPE_WEBHOOK_SECRET")?;
-    let single_price_id = required_env("STRIPE_SINGLE_PRICE_ID")?;
+    let single_price_id = required_env("STRIPE_SINGLE_PRICE_ID");
     let pro_price_id = required_env("STRIPE_PRO_PRICE_ID")?;
     let public_base_url = required_env("PUBLIC_BASE_URL")?;
     if !secret_key.starts_with("sk_")
         || !webhook_secret.starts_with("whsec_")
-        || !single_price_id.starts_with("price_")
+        || single_price_id
+            .as_ref()
+            .is_some_and(|price_id| !price_id.starts_with("price_"))
         || !pro_price_id.starts_with("price_")
         || !public_base_url.starts_with("https://")
     {
