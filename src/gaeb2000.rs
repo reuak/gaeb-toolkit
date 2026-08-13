@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 
 use crate::gaeb_reader::{GaebDocument, GaebItem, GaebRow};
 
-/// Liest GAEB DA 2000 der Phasen P81 und P83.
+/// Liest GAEB DA 2000 der Phasen P81, P83 und P84.
 pub fn read_gaeb_2000(path: impl AsRef<Path>) -> Result<GaebDocument> {
     let path = path.as_ref();
     let bytes = fs::read(path).with_context(|| {
@@ -116,13 +116,13 @@ fn parse_gaeb_2000(source: &str, text: &str) -> Result<GaebDocument> {
     }
     finish_item(&mut document, &mut item);
 
-    if !matches!(document.exchange_phase.as_str(), "81" | "83") {
+    if !matches!(document.exchange_phase.as_str(), "81" | "83" | "84") {
         bail!(
             "GAEB DA 2000 Phase P{} wird noch nicht unterstützt.",
             document.exchange_phase
         );
     }
-    if document.exchange_phase == "83"
+    if matches!(document.exchange_phase.as_str(), "83" | "84")
         && !document
             .rows
             .iter()
@@ -180,6 +180,16 @@ fn apply_value(
         ("Menge", true) => {
             if let Some(position) = item.as_mut() {
                 position.quantity = parse_decimal(&value);
+            }
+        }
+        ("EP", true) => {
+            if let Some(position) = item.as_mut() {
+                position.unit_price = parse_decimal(&value);
+            }
+        }
+        ("GB", true) => {
+            if let Some(position) = item.as_mut() {
+                position.total_price = parse_decimal(&value);
             }
         }
         ("OZ", false) if sections.last().is_some_and(|value| value == "LVBereich") => {

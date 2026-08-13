@@ -67,7 +67,7 @@ fn write_priced(
     allow_conflicts: bool,
     phase: Phase,
 ) -> Result<()> {
-    let conflicts = priced_conflicts(boq);
+    let conflicts = priced_conflicts(boq, phase);
     if !allow_conflicts && !conflicts.is_empty() {
         bail!(
             "{}-Export gesperrt: {} Konflikt(e) müssen manuell geprüft werden:\n- {}\nDanach erneut mit --allow-conflicts exportieren.",
@@ -109,7 +109,7 @@ fn write_priced(
     write_boq_info(&mut writer, boq)?;
     writer.write_event(Event::Start(BytesStart::new("BoQBody")))?;
     for node in &boq.roots {
-        write_category(&mut writer, node, &mut ids)?;
+        write_category(&mut writer, node, &mut ids, phase)?;
     }
     writer.write_event(Event::End(BytesEnd::new("BoQBody")))?;
     writer.write_event(Event::End(BytesEnd::new("BoQ")))?;
@@ -118,9 +118,35 @@ fn write_priced(
     Ok(())
 }
 
-fn priced_conflicts(boq: &BillOfQuantities) -> Vec<String> {
-    let mut conflicts = x83_conflicts(boq);
+fn priced_conflicts(boq: &BillOfQuantities, phase: Phase) -> Vec<String> {
+    let mut conflicts = if matches!(phase, Phase::X83) {
+        x83_conflicts(boq)
+    } else {
+        priced_oz_conflicts(&boq.roots)
+    };
     collect_price_conflicts(&boq.roots, &mut conflicts);
+    conflicts
+}
+
+fn priced_oz_conflicts(nodes: &[Node]) -> Vec<String> {
+    use std::collections::HashSet;
+
+    fn visit(nodes: &[Node], seen: &mut HashSet<String>, conflicts: &mut Vec<String>) {
+        for node in nodes {
+            for position in &node.positions {
+                if position.oz.trim().is_empty() {
+                    conflicts.push("OZ fehlt bei einer Position".to_owned());
+                } else if !seen.insert(position.oz.clone()) {
+                    conflicts.push(format!("OZ doppelt: {}", position.oz));
+                }
+            }
+            visit(&node.children, seen, conflicts);
+        }
+    }
+
+    let mut seen = HashSet::new();
+    let mut conflicts = Vec::new();
+    visit(nodes, &mut seen, &mut conflicts);
     conflicts
 }
 
@@ -205,6 +231,7 @@ fn write_category<W: std::io::Write>(
     writer: &mut Writer<W>,
     node: &Node,
     ids: &mut IdGenerator,
+    phase: Phase,
 ) -> Result<()> {
     let id = ids.next();
     let rno = node.oz.rsplit('.').next().unwrap_or(&node.oz);
@@ -216,12 +243,12 @@ fn write_category<W: std::io::Write>(
     writer.write_event(Event::Start(BytesStart::new("BoQBody")))?;
 
     for child in &node.children {
-        write_category(writer, child, ids)?;
+        write_category(writer, child, ids, phase)?;
     }
     if !node.positions.is_empty() {
         writer.write_event(Event::Start(BytesStart::new("Itemlist")))?;
         for position in &node.positions {
-            write_item(writer, position, ids)?;
+            write_item(writer, position, ids, phase)?;
         }
         writer.write_event(Event::End(BytesEnd::new("Itemlist")))?;
     }
@@ -235,6 +262,7 @@ fn write_item<W: std::io::Write>(
     writer: &mut Writer<W>,
     position: &Position,
     ids: &mut IdGenerator,
+    phase: Phase,
 ) -> Result<()> {
     let id = ids.next();
     let rno = position.oz.rsplit('.').next().unwrap_or(&position.oz);
@@ -243,15 +271,17 @@ fn write_item<W: std::io::Write>(
     start.push_attribute(("RNoPart", rno));
     writer.write_event(Event::Start(start))?;
 
-    if let Some(quantity) = position.quantity {
-        write_decimal(writer, "Qty", quantity, 3)?;
-    }
-    if let Some(unit) = position
-        .unit
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        write_text(writer, "QU", unit)?;
+    if matches!(phase, Phase::X83) {
+        if let Some(quantity) = position.quantity {
+            write_decimal(writer, "Qty", quantity, 3)?;
+        }
+        if let Some(unit) = position
+            .unit
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            write_text(writer, "QU", unit)?;
+        }
     }
     if let Some(unit_price) = position.unit_price {
         write_decimal(writer, "UP", unit_price, 2)?;
@@ -260,20 +290,22 @@ fn write_item<W: std::io::Write>(
         write_decimal(writer, "IT", total_price, 2)?;
     }
 
-    writer.write_event(Event::Start(BytesStart::new("Description")))?;
-    writer.write_event(Event::Start(BytesStart::new("CompleteText")))?;
-    if !position.long_text.trim().is_empty() {
-        writer.write_event(Event::Start(BytesStart::new("DetailTxt")))?;
-        write_text_block(writer, "Text", &position.long_text)?;
-        writer.write_event(Event::End(BytesEnd::new("DetailTxt")))?;
+    if matches!(phase, Phase::X83) {
+        writer.write_event(Event::Start(BytesStart::new("Description")))?;
+        writer.write_event(Event::Start(BytesStart::new("CompleteText")))?;
+        if !position.long_text.trim().is_empty() {
+            writer.write_event(Event::Start(BytesStart::new("DetailTxt")))?;
+            write_text_block(writer, "Text", &position.long_text)?;
+            writer.write_event(Event::End(BytesEnd::new("DetailTxt")))?;
+        }
+        writer.write_event(Event::Start(BytesStart::new("OutlineText")))?;
+        writer.write_event(Event::Start(BytesStart::new("OutlTxt")))?;
+        write_text_block(writer, "TextOutlTxt", &position.short_text)?;
+        writer.write_event(Event::End(BytesEnd::new("OutlTxt")))?;
+        writer.write_event(Event::End(BytesEnd::new("OutlineText")))?;
+        writer.write_event(Event::End(BytesEnd::new("CompleteText")))?;
+        writer.write_event(Event::End(BytesEnd::new("Description")))?;
     }
-    writer.write_event(Event::Start(BytesStart::new("OutlineText")))?;
-    writer.write_event(Event::Start(BytesStart::new("OutlTxt")))?;
-    write_text_block(writer, "TextOutlTxt", &position.short_text)?;
-    writer.write_event(Event::End(BytesEnd::new("OutlTxt")))?;
-    writer.write_event(Event::End(BytesEnd::new("OutlineText")))?;
-    writer.write_event(Event::End(BytesEnd::new("CompleteText")))?;
-    writer.write_event(Event::End(BytesEnd::new("Description")))?;
     writer.write_event(Event::End(BytesEnd::new("Item")))?;
     Ok(())
 }
@@ -418,6 +450,10 @@ mod tests {
         assert!(xml.contains("<ProgName>Umgewandelt mit GAEB.hawkvision.de</ProgName>"));
         assert!(xml.contains("<UP>10</UP>"));
         assert!(xml.contains("<IT>25</IT>"));
+        assert!(!xml.contains("<Qty>"));
+        assert!(!xml.contains("<QU>"));
+        assert!(!xml.contains("<Description>"));
+        assert!(!xml.contains("Leistung"));
     }
 
     #[test]
@@ -430,5 +466,9 @@ mod tests {
         assert!(xml.contains("<DP>83</DP>"));
         assert!(xml.contains("<ProgName>Umgewandelt mit GAEB.hawkvision.de</ProgName>"));
         assert!(xml.contains("<UP>10</UP>"));
+        assert!(xml.contains("<Qty>2.5</Qty>"));
+        assert!(xml.contains("<QU>St</QU>"));
+        assert!(xml.contains("<Description>"));
+        assert!(xml.contains("Leistung"));
     }
 }

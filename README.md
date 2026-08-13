@@ -83,9 +83,11 @@ Die erste Webversion bietet:
 - Kontaktdaten und Einwilligung
 - drei kostenlose Konvertierungen pro E-Mail und Monat, jeweils bis 50 Positionen
 - asynchrone PDF-zu-X83-Konvertierung
-- direkte GAEB-90-D81/D83-, GAEB-DA-2000-P81/P83- und
+- direkte GAEB-90-D81/D83/D84-, GAEB-DA-2000-P81/P83/P84- und
   GAEB-DA-XML-X80-bis-X86/X89-zu-PDF-Lesefassung ohne Dokumentenspeicherung
-- Modernisierung von D81/D83 und P81/P83 nach GAEB DA XML X83
+- Modernisierung von D81/D83 und P81/P83/P84 nach GAEB DA XML X83
+- Angebotskonvertierung von bepreisten X84-Dateien nach GAEB DA 2000 P84
+- Angebotskonvertierung von bepreisten X84-Dateien nach GAEB 90 D84
 - gemeinsames Monatskontingent für beide Richtungen: 3 kostenlos, 100 mit aktivem Pro-Abo
 - geschützten Download-Link
 - automatische Löschung nach 24 Stunden
@@ -132,9 +134,10 @@ SMTP_PASSWORD=change-me
 SMTP_FROM=gaeb@example.de
 GOOGLE_TAG_MANAGER_ID=GTM-TF86FD6Z
 GOOGLE_ANALYTICS_ID=
+GOOGLE_ADS_ID=AW-18376784283
 META_PIXEL_ID=
 KLICKTIPP_PIXEL_URL=
-COOKIE_CONSENT_VERSION=2
+COOKIE_CONSENT_VERSION=3
 PUBLIC_BASE_URL=https://gaeb.example.de
 STRIPE_SECRET_KEY=
 STRIPE_WEBHOOK_SECRET=
@@ -146,6 +149,7 @@ REGULAR_SINGLE_NET_CENTS=990
 REGULAR_PRO_NET_CENTS=1900
 OFFER_BANNER_TEXT=
 ADMIN_TOKEN=
+INTEGRATION_API_KEYS=
 TEST_LAB_ENABLED=false
 RUST_LOG=info
 ```
@@ -160,6 +164,47 @@ zufälliger `ADMIN_TOKEN` gesetzt wurde.
 Das PDF-Stapel-Testlabor unter `/testlabor.html` und sein API-Endpunkt sind nur
 erreichbar, wenn zusätzlich `TEST_LAB_ENABLED=true` gesetzt ist. Im regulären
 Betrieb sollte der Wert `false` bleiben.
+
+### REST-API für Dolibarr und andere Integrationen
+
+Die Integrations-API verwendet dieselbe Parser- und Exportlogik wie die
+Weboberfläche. Sie wird erst aktiv, wenn `INTEGRATION_API_KEYS` einen oder mehrere
+kommagetrennte Schlüssel mit jeweils mindestens 32 Zeichen enthält. Für jedes
+angeschlossene System sollte ein eigener zufälliger Schlüssel verwendet werden.
+
+Verfügbare Formate abfragen:
+
+```bash
+curl -sS https://gaeb.example.de/api/v1/formats \
+  -H "Authorization: Bearer $GAEB_API_KEY"
+```
+
+Ein einzelnes Zielformat wird direkt als Datei geliefert:
+
+```bash
+curl -fS https://gaeb.example.de/api/v1/convert \
+  -H "Authorization: Bearer $GAEB_API_KEY" \
+  -F "file=@angebot.x84" \
+  -F "format=p84" \
+  -o angebot.p84
+```
+
+Mehrere Formate werden als ZIP geliefert:
+
+```bash
+curl -fS https://gaeb.example.de/api/v1/convert \
+  -H "X-API-Key: $GAEB_API_KEY" \
+  -F "file=@leistungsverzeichnis.pdf" \
+  -F "formats=x83,x84,p84" \
+  -o exporte.zip
+```
+
+Unterstützte Eingaben sind PDF, D81/D83/D84, P81/P83/P84 sowie GAEB DA XML
+X80 bis X86, X89 und XML. Mögliche Ausgaben sind PDF, X83, X84, P84 und D84.
+Bei fachlich unmöglichen Konvertierungen antwortet die API mit HTTP 422 und einem
+JSON-Fehler. `allow_conflicts=true` darf nur in ausdrücklich prüfpflichtigen
+internen Arbeitsabläufen verwendet werden. Die maximale Dateigröße entspricht
+`PAID_MAX_UPLOAD_BYTES`.
 
 ### Stripe im Testmodus
 
@@ -189,7 +234,8 @@ Einzel-Credit automatisch zurückgebucht.
 Die Tracking-Einstellungen sind optional. Ohne Wert wird der jeweilige Dienst
 weder angezeigt noch geladen. `GOOGLE_TAG_MANAGER_ID` erwartet eine Container-ID
 wie `GTM-XXXXXXX`, `GOOGLE_ANALYTICS_ID` eine direkte GA4-ID wie
-`G-XXXXXXXXXX`, `META_PIXEL_ID` die numerische Pixel-ID und
+`G-XXXXXXXXXX`, `GOOGLE_ADS_ID` eine Google-Ads-ID wie `AW-123456789`,
+`META_PIXEL_ID` die numerische Pixel-ID und
 `KLICKTIPP_PIXEL_URL` die vollständige HTTPS-URL aus dem in KlickTipp erzeugten
 Tagging-Pixel. Externe Anfragen erfolgen erst nach der passenden Einwilligung im
 Cookie-Banner. Wird dessen Text oder Zweck wesentlich geändert, kann

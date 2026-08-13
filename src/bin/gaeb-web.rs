@@ -19,7 +19,7 @@ use axum::{
 use chrono::{Duration as ChronoDuration, Utc};
 use gaeb_toolkit::{
     apply_provisional_flags, gaeb_document_to_boq, inject_pdf_pngs, parse_pdf, read_gaeb,
-    write_gaeb_pdf, write_x83, write_x84,
+    write_d84, write_gaeb_pdf, write_p84, write_x83, write_x84,
 };
 use hmac::{Hmac, Mac};
 use lettre::{
@@ -59,6 +59,7 @@ struct AppState {
     stripe: Option<StripeConfig>,
     offer: OfferConfig,
     admin_token_hash: Option<String>,
+    integration_api_key_hashes: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -134,6 +135,17 @@ struct DownloadOption {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Serialize)]
+struct IntegrationApiInfo {
+    name: &'static str,
+    version: &'static str,
+    max_upload_bytes: usize,
+    authentication: &'static str,
+    input_formats: Vec<&'static str>,
+    output_formats: Vec<&'static str>,
+    multiple_outputs: &'static str,
 }
 
 #[derive(Serialize)]
@@ -312,6 +324,7 @@ struct ImprintResponse {
 struct PublicTrackingConfig {
     google_tag_manager_id: Option<String>,
     google_analytics_id: Option<String>,
+    google_ads_id: Option<String>,
     meta_pixel_id: Option<String>,
     klicktipp_pixel_url: Option<String>,
     consent_version: String,
@@ -366,6 +379,13 @@ async fn main() -> Result<()> {
         stripe: stripe_config(),
         offer: offer_config(),
         admin_token_hash: required_env("ADMIN_TOKEN").map(|value| hash_token(&value)),
+        integration_api_key_hashes: env::var("INTEGRATION_API_KEYS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| value.len() >= 32)
+            .map(hash_token)
+            .collect(),
     });
     init_database(&state)?;
     backfill_stripe_events(&state)?;
@@ -389,6 +409,9 @@ async fn main() -> Result<()> {
         .route("/health", get(health))
         .route("/api/convert", post(create_job))
         .route("/api/gaeb-to-pdf", post(gaeb_to_pdf))
+        .route("/api/v1", get(integration_api_info))
+        .route("/api/v1/formats", get(integration_api_info))
+        .route("/api/v1/convert", post(integration_convert))
         .route("/api/legal/imprint", get(imprint))
         .route("/api/public-config", get(public_config))
         .route("/api/billing/config", get(billing_config))
@@ -456,6 +479,265 @@ async fn main() -> Result<()> {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+async fn integration_api_info(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<IntegrationApiInfo>, ApiError> {
+    require_integration_api(&state, &headers)?;
+    Ok(Json(IntegrationApiInfo {
+        name: "GAEB.hawkvision.de Conversion API",
+        version: "v1",
+        max_upload_bytes: state.paid_max_upload_bytes,
+        authentication: "Authorization: Bearer <key> oder X-API-Key: <key>",
+        input_formats: vec![
+            "pdf", "d81", "d83", "d84", "p81", "p83", "p84", "x80", "x81", "x82", "x83", "x84",
+            "x85", "x86", "x89", "xml",
+        ],
+        output_formats: vec!["pdf", "x83", "x84", "p84", "d84"],
+        multiple_outputs: "Mehrere Formate werden als ZIP geliefert.",
+    }))
+}
+
+async fn integration_convert(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Response, ApiError> {
+    require_integration_api(&state, &headers)?;
+    let mut filename = String::new();
+    let mut input = Vec::new();
+    let mut formats = Vec::<String>::new();
+    let mut allow_conflicts = false;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| ApiError::bad_request("Multipart-Anfrage konnte nicht gelesen werden."))?
+    {
+        match field.name().unwrap_or_default() {
+            "file" => {
+                filename = field.file_name().unwrap_or("input").to_owned();
+                input = field
+                    .bytes()
+                    .await
+                    .map_err(|_| ApiError::bad_request("Datei konnte nicht gelesen werden."))?
+                    .to_vec();
+            }
+            "format" | "formats" => {
+                let value = field.text().await.map_err(|_| {
+                    ApiError::bad_request("Formatauswahl konnte nicht gelesen werden.")
+                })?;
+                formats.extend(
+                    value
+                        .split(',')
+                        .map(|value| value.trim().to_ascii_lowercase())
+                        .filter(|value| !value.is_empty()),
+                );
+            }
+            "allow_conflicts" => {
+                let value = field.text().await.unwrap_or_default();
+                allow_conflicts = matches!(value.trim(), "1" | "true" | "on");
+            }
+            _ => {}
+        }
+    }
+    if input.is_empty() || filename.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "Multipart-Feld 'file' mit einer Quelldatei ist erforderlich.",
+        ));
+    }
+    if input.len() > state.paid_max_upload_bytes {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Die API akzeptiert maximal {} MB pro Datei.",
+                state.paid_max_upload_bytes / 1024 / 1024
+            ),
+        ));
+    }
+    formats.sort();
+    formats.dedup();
+    if formats.is_empty() {
+        return Err(ApiError::bad_request(
+            "Multipart-Feld 'format' oder 'formats' ist erforderlich.",
+        ));
+    }
+    if formats
+        .iter()
+        .any(|format| !matches!(format.as_str(), "pdf" | "x83" | "x84" | "p84" | "d84"))
+    {
+        return Err(ApiError::bad_request(
+            "Unterstützte Zielformate: pdf, x83, x84, p84, d84.",
+        ));
+    }
+    let is_pdf = input.starts_with(b"%PDF-");
+    if !is_pdf && !supported_gaeb_filename(&filename) {
+        return Err(ApiError::bad_request(
+            "Nicht unterstütztes Eingabeformat. /api/v1/formats zeigt die Formate an.",
+        ));
+    }
+
+    let request_id = Uuid::new_v4().simple().to_string();
+    let source_name = safe_filename(&filename);
+    let outputs = task::spawn_blocking(move || {
+        convert_integration_file(&source_name, &input, is_pdf, &formats, allow_conflicts)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+    .map_err(|error| {
+        error!(%error, %request_id, "integration conversion failed");
+        ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, error.to_string())
+    })?;
+    info!(%request_id, source = %filename, outputs = outputs.len(), "integration conversion completed");
+    integration_output_response(&filename, outputs)
+}
+
+fn require_integration_api(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    if state.integration_api_key_hashes.is_empty() {
+        return Err(ApiError::unavailable(
+            "Die Integrations-API ist nicht konfiguriert.",
+        ));
+    }
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let key = bearer.or_else(|| {
+        headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+    });
+    let valid = key.map(hash_token).is_some_and(|hash| {
+        state
+            .integration_api_key_hashes
+            .iter()
+            .any(|value| value == &hash)
+    });
+    if !valid {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "Gültiger API-Key erforderlich.",
+        ));
+    }
+    Ok(())
+}
+
+fn convert_integration_file(
+    filename: &str,
+    bytes: &[u8],
+    is_pdf: bool,
+    formats: &[String],
+    allow_conflicts: bool,
+) -> Result<Vec<(String, Vec<u8>)>> {
+    let directory = tempfile::tempdir()?;
+    let input_path = directory.path().join(filename);
+    std::fs::write(&input_path, bytes)?;
+
+    let (boq, document) = if is_pdf {
+        (parse_pdf(&input_path)?, None)
+    } else {
+        let document = read_gaeb(&input_path)?;
+        let boq = gaeb_document_to_boq(&document);
+        (boq, Some(document))
+    };
+    let stem = safe_filename(
+        Path::new(filename)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("konvertierung"),
+    );
+    let mut outputs = Vec::new();
+    for format in formats {
+        let output = directory.path().join(format!("output.{format}"));
+        match format.as_str() {
+            "pdf" => {
+                let source_document = document.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("PDF kann nicht erneut als PDF ausgegeben werden.")
+                })?;
+                write_gaeb_pdf(source_document, &output)?;
+            }
+            "x83" => write_x83(&boq, &output, allow_conflicts)?,
+            "x84" => write_x84(&boq, &output, allow_conflicts)?,
+            "p84" | "d84" => {
+                let generated_document = if document.is_none() {
+                    let priced_xml = directory.path().join("priced-source.x84");
+                    write_x84(&boq, &priced_xml, allow_conflicts)?;
+                    Some(read_gaeb(&priced_xml)?)
+                } else {
+                    None
+                };
+                let priced_document = document
+                    .as_ref()
+                    .or(generated_document.as_ref())
+                    .expect("source or generated document");
+                if format == "p84" {
+                    write_p84(priced_document, &output)?;
+                } else {
+                    write_d84(priced_document, &output)?;
+                }
+            }
+            _ => unreachable!("validated format"),
+        }
+        outputs.push((format!("{stem}.{format}"), std::fs::read(output)?));
+    }
+    Ok(outputs)
+}
+
+fn integration_output_response(
+    input_filename: &str,
+    mut outputs: Vec<(String, Vec<u8>)>,
+) -> Result<Response, ApiError> {
+    use std::io::{Cursor, Write};
+    use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+    let (download_name, content_type, body) = if outputs.len() == 1 {
+        let (name, bytes) = outputs.pop().expect("one output");
+        let content_type = match Path::new(&name)
+            .extension()
+            .and_then(|value| value.to_str())
+        {
+            Some("pdf") => "application/pdf",
+            Some("x83" | "x84") => "application/xml; charset=utf-8",
+            _ => "application/octet-stream",
+        };
+        (name, content_type, bytes)
+    } else {
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let cursor = Cursor::new(Vec::new());
+        let mut archive = ZipWriter::new(cursor);
+        for (name, bytes) in outputs {
+            archive
+                .start_file(name, options)
+                .map_err(|_| ApiError::internal())?;
+            archive
+                .write_all(&bytes)
+                .map_err(|_| ApiError::internal())?;
+        }
+        let stem = safe_filename(
+            Path::new(input_filename)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("konvertierung"),
+        );
+        (
+            format!("{stem}-exporte.zip"),
+            "application/zip",
+            archive
+                .finish()
+                .map_err(|_| ApiError::internal())?
+                .into_inner(),
+        )
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{download_name}\""))
+            .map_err(|_| ApiError::internal())?,
+    );
+    Ok((headers, Body::from(body)).into_response())
 }
 
 async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicTrackingConfig> {
@@ -1336,7 +1618,6 @@ async fn admin_test_convert(
                 export_warnings.push(format!("Sicherer X84-Export: {error}"));
                 write_x84(&boq, &x84, true)?;
             }
-            inject_pdf_pngs(&input, &x84, &boq)?;
             apply_provisional_flags(&x84, &boq)?;
         }
 
@@ -1780,12 +2061,12 @@ async fn gaeb_to_pdf(
     }
     if !supported_gaeb_filename(&filename) {
         return Err(ApiError::bad_request(
-            "Nicht unterstütztes Format. Bitte D81, D83, P81, P83 oder GAEB DA XML als X80 bis X86 beziehungsweise X89 auswählen.",
+            "Nicht unterstütztes Format. Bitte D81, D83, D84, P81, P83, P84 oder GAEB DA XML als X80 bis X86 beziehungsweise X89 auswählen.",
         ));
     }
-    if !matches!(output_format.as_str(), "pdf" | "x83") {
+    if !matches!(output_format.as_str(), "pdf" | "x83" | "p84" | "d84") {
         return Err(ApiError::bad_request(
-            "Bitte PDF oder X83 als Ausgabeformat wählen.",
+            "Bitte PDF, X83, P84 oder D84 als Ausgabeformat wählen.",
         ));
     }
     let access = billing_access_from_headers(&state, &headers).map_err(|_| ApiError::internal())?;
@@ -1830,6 +2111,10 @@ async fn gaeb_to_pdf(
         if output_extension == "x83" {
             let boq = gaeb_document_to_boq(&document);
             write_x83(&boq, &output, false)?;
+        } else if output_extension == "p84" {
+            write_p84(&document, &output)?;
+        } else if output_extension == "d84" {
+            write_d84(&document, &output)?;
         } else {
             write_gaeb_pdf(&document, &output)?;
         }
@@ -1850,10 +2135,10 @@ async fn gaeb_to_pdf(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static(if output_format == "x83" {
-            "application/xml; charset=utf-8"
-        } else {
-            "application/pdf"
+        HeaderValue::from_static(match output_format.as_str() {
+            "x83" => "application/xml; charset=utf-8",
+            "p84" | "d84" => "application/octet-stream",
+            _ => "application/pdf",
         }),
     );
     headers.insert(
@@ -3139,8 +3424,10 @@ fn supported_gaeb_filename(filename: &str) -> bool {
                 extension.as_str(),
                 "d81"
                     | "d83"
+                    | "d84"
                     | "p81"
                     | "p83"
+                    | "p84"
                     | "x80"
                     | "x81"
                     | "x82"
@@ -3290,6 +3577,18 @@ fn tracking_config() -> PublicTrackingConfig {
                             || character == '-'
                     })
             }),
+        google_ads_id: env::var("GOOGLE_ADS_ID")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| {
+                value.starts_with("AW-")
+                    && value.len() <= 32
+                    && value.chars().all(|character| {
+                        character.is_ascii_uppercase()
+                            || character.is_ascii_digit()
+                            || character == '-'
+                    })
+            }),
         meta_pixel_id: env::var("META_PIXEL_ID")
             .ok()
             .map(|value| value.trim().to_owned())
@@ -3384,9 +3683,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        account_access_email_allowed, account_logout, extract_imprint_sections, hash_token,
-        init_database, mask_profanity, output_filename, record_and_apply_stripe_event,
-        reserve_conversion_usage, supported_gaeb_filename, verify_stripe_signature, AppState,
+        account_access_email_allowed, account_logout, convert_integration_file,
+        extract_imprint_sections, hash_token, init_database, mask_profanity, output_filename,
+        record_and_apply_stripe_event, reserve_conversion_usage, supported_gaeb_filename,
+        verify_stripe_signature, AppState,
     };
 
     #[test]
@@ -3432,8 +3732,10 @@ mod tests {
         for filename in [
             "altbestand.d81",
             "altbestand.D83",
+            "angebot.D84",
             "da2000.p81",
             "da2000.P83",
+            "angebot.P84",
             "lv.x80",
             "lv.X83",
             "angebot.x84",
@@ -3443,9 +3745,38 @@ mod tests {
         ] {
             assert!(supported_gaeb_filename(filename), "{filename}");
         }
-        for filename in ["lv.p84", "lv.pdf", "lv", "lv.exe"] {
+        for filename in ["lv.pdf", "lv", "lv.exe"] {
             assert!(!supported_gaeb_filename(filename), "{filename}");
         }
+    }
+
+    #[test]
+    fn integration_api_converts_compact_x84_to_multiple_formats() {
+        let source = br#"<?xml version="1.0" encoding="UTF-8"?>
+<GAEB xmlns="http://www.gaeb.de/GAEB_DA_XML/DA84/3.3">
+ <Award><DP>84</DP><AwardInfo><Cur>EUR</Cur></AwardInfo><BoQ><BoQInfo>
+  <BoQBkdn><Type>BoQLevel</Type><Length>2</Length></BoQBkdn>
+  <BoQBkdn><Type>Item</Type><Length>3</Length></BoQBkdn>
+ </BoQInfo><BoQBody><BoQCtgy RNoPart="1"><BoQBody><Itemlist>
+  <Item RNoPart="1"><UP>12.500</UP><IT>25.00</IT></Item>
+ </Itemlist></BoQBody></BoQCtgy></BoQBody></BoQ></Award>
+</GAEB>"#;
+        let formats = vec!["p84".to_owned(), "x84".to_owned()];
+        let outputs = convert_integration_file("angebot.x84", source, false, &formats, false)
+            .expect("integration conversion");
+        assert_eq!(outputs.len(), 2);
+        let p84 = outputs
+            .iter()
+            .find(|(name, _)| name.ends_with(".p84"))
+            .expect("p84 output");
+        assert!(String::from_utf8_lossy(&p84.1).contains("[EP]12,500[end]"));
+        let x84 = outputs
+            .iter()
+            .find(|(name, _)| name.ends_with(".x84"))
+            .expect("x84 output");
+        let xml = String::from_utf8_lossy(&x84.1);
+        assert!(xml.contains("<UP>12.5</UP>"));
+        assert!(!xml.contains("<Description>"));
     }
 
     #[test]
@@ -3510,6 +3841,7 @@ mod tests {
                 banner: None,
             },
             admin_token_hash: None,
+            integration_api_key_hashes: Vec::new(),
         });
         init_database(&state).unwrap();
 
@@ -3548,6 +3880,7 @@ mod tests {
                 banner: None,
             },
             admin_token_hash: None,
+            integration_api_key_hashes: Vec::new(),
         });
         init_database(&state).unwrap();
         let payload = r#"{
@@ -3611,6 +3944,7 @@ mod tests {
                 banner: None,
             },
             admin_token_hash: None,
+            integration_api_key_hashes: Vec::new(),
         });
         init_database(&state).unwrap();
         let raw_session = "session-secret";
@@ -3667,6 +4001,7 @@ mod tests {
                 banner: None,
             },
             admin_token_hash: None,
+            integration_api_key_hashes: Vec::new(),
         });
         init_database(&state).unwrap();
         let connection = Connection::open(db_path).unwrap();
@@ -3710,6 +4045,7 @@ mod tests {
                 banner: None,
             },
             admin_token_hash: None,
+            integration_api_key_hashes: Vec::new(),
         });
         init_database(&state).unwrap();
         let connection = Connection::open(&db_path).unwrap();

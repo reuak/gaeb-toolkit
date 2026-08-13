@@ -108,6 +108,12 @@ async function initializeBilling() {
       event.preventDefault();
       const button = form.querySelector("button");
       const note = form.querySelector(".checkout-note");
+      const emailInput = form.querySelector('input[type="email"]');
+      if (!emailInput?.checkValidity()) {
+        note.textContent = "Bitte eine gültige E-Mail-Adresse eingeben.";
+        emailInput?.focus();
+        return;
+      }
       button.disabled = true;
       note.textContent = "Sicherer Stripe-Checkout wird geöffnet …";
       try {

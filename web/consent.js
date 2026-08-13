@@ -4,7 +4,7 @@
   const config = await response.json();
   const services = {
     analytics: Boolean(config.google_tag_manager_id || config.google_analytics_id),
-    marketing: Boolean(config.meta_pixel_id || config.klicktipp_pixel_url),
+    marketing: Boolean(config.google_ads_id || config.meta_pixel_id || config.klicktipp_pixel_url),
   };
   if (!services.analytics && !services.marketing) {
     document.querySelectorAll("[data-open-consent]").forEach((button) => {
@@ -70,6 +70,22 @@
     }
   }
 
+  function loadGoogleAds(choice) {
+    if (!config.google_ads_id) return;
+    window.dataLayer = window.dataLayer || [];
+    window.gtag = window.gtag || function gtag() { window.dataLayer.push(arguments); };
+    window.gtag("consent", "default", {
+      analytics_storage: "denied",
+      ad_storage: "denied",
+      ad_user_data: "denied",
+      ad_personalization: "denied",
+    });
+    updateGoogleConsent(choice);
+    injectScript(`https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(config.google_ads_id)}`);
+    window.gtag("js", new Date());
+    window.gtag("config", config.google_ads_id);
+  }
+
   function loadMeta() {
     if (!config.meta_pixel_id) return;
     ((f, b, e, v, n, t, s) => {
@@ -104,6 +120,7 @@
     updateGoogleConsent(choice);
     if (choice.marketing && !loaded.marketing) {
       loaded.marketing = true;
+      loadGoogleAds(choice);
       loadMeta();
       loadKlickTipp();
     }
@@ -158,7 +175,7 @@
             <span><strong>Notwendig</strong><small>Konvertierung, Sicherheit und Speicherung Ihrer Auswahl.</small></span>
           </label>
           ${services.analytics ? `<label class="consent-option"><input id="consent-analytics" type="checkbox" ${stored.analytics ? "checked" : ""} /><span><strong>Statistik</strong><small>Google Ireland: Tag Manager und Analytics zur Reichweitenmessung. Dabei können Nutzungsprofile entstehen und Daten in den USA verarbeitet werden.</small></span></label>` : ""}
-          ${services.marketing ? `<label class="consent-option"><input id="consent-marketing" type="checkbox" ${stored.marketing ? "checked" : ""} /><span><strong>Marketing</strong><small>Meta Pixel und/oder KlickTipp, soweit konfiguriert.</small></span></label>` : ""}
+          ${services.marketing ? `<label class="consent-option"><input id="consent-marketing" type="checkbox" ${stored.marketing ? "checked" : ""} /><span><strong>Marketing</strong><small>Google Ads, Meta Pixel und/oder KlickTipp, soweit konfiguriert.</small></span></label>` : ""}
         </div>
         <div class="consent-actions">
           <button type="button" data-consent="reject">Nur notwendige</button>

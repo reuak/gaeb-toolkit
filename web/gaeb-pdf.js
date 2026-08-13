@@ -4,7 +4,7 @@ const meta = document.querySelector("#gaeb-file-meta");
 const note = document.querySelector("#gaeb-note");
 const outputSelect = document.querySelector("#gaeb-output-format");
 const checkoutForm = document.querySelector("#gaeb-pro-checkout");
-const allowedExtensions = new Set(["d81", "d83", "p81", "p83", "x80", "x81", "x82", "x83", "x84", "x85", "x86", "x89", "xml"]);
+const allowedExtensions = new Set(["d81", "d83", "d84", "p81", "p83", "p84", "x80", "x81", "x82", "x83", "x84", "x85", "x86", "x89", "xml"]);
 let limit = 2 * 1024 * 1024;
 
 document.querySelector("#year").textContent = new Date().getFullYear();
@@ -27,7 +27,7 @@ async function init() {
       document.querySelector("#gaeb-kicker").textContent = "GAEB Pro · Zugang aktiv";
       document.querySelector("#gaeb-limit").textContent = "Bis 25 MB pro Datei";
       document.querySelector("#gaeb-volume").textContent = "100 Konvertierungen pro Monat · beide Richtungen";
-      meta.textContent = "GAEB 90: D81/D83 · DA 2000: P81/P83 · DA XML: X80–X86, X89 · maximal 25 MB";
+      meta.textContent = "GAEB 90: D81/D83/D84 · DA 2000: P81/P83/P84 · DA XML: X80–X86, X89 · maximal 25 MB";
       note.textContent = "Diese Konvertierung zählt zu Ihrem gemeinsamen Pro-Monatskontingent.";
       const upsell = document.querySelector("#gaeb-pro-upsell");
       if (upsell) upsell.hidden = true;
@@ -64,6 +64,12 @@ async function initializeCheckout() {
 
   checkoutForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const emailInput = checkoutForm.querySelector('input[type="email"]');
+    if (!emailInput?.checkValidity()) {
+      checkoutNote.textContent = "Bitte eine gültige E-Mail-Adresse eingeben.";
+      emailInput?.focus();
+      return;
+    }
     button.disabled = true;
     checkoutNote.textContent = "Sicherer Stripe-Checkout wird geöffnet …";
     try {
@@ -89,11 +95,17 @@ input.addEventListener("change", () => {
   document.querySelector("#gaeb-file-title").textContent = file.name;
   meta.textContent = allowedExtensions.has(extension)
     ? `${(file.size / 1024 / 1024).toFixed(2)} MB · ${extension.toUpperCase()}`
-    : "Nicht unterstütztes Format. Bitte D81, D83, P81, P83, X80–X86, X89 oder XML wählen.";
+    : "Nicht unterstütztes Format. Bitte D81, D83, D84, P81, P83, P84, X80–X86, X89 oder XML wählen.";
 });
 
 outputSelect.addEventListener("change", () => {
-  const label = outputSelect.value === "x83" ? "Als modernes X83 herunterladen" : "GAEB als PDF herunterladen";
+  const labels = {
+    x83: "Als modernes X83 herunterladen",
+    p84: "Als GAEB-2000-P84 herunterladen",
+    d84: "Als GAEB-90-D84 herunterladen",
+    pdf: "GAEB als PDF herunterladen",
+  };
+  const label = labels[outputSelect.value] || labels.pdf;
   form.querySelector("button[type=submit] span").textContent = label;
 });
 
@@ -102,7 +114,7 @@ form.addEventListener("submit", async (event) => {
   const file = input.files[0];
   if (!file) return;
   if (!allowedExtensions.has(extensionOf(file))) {
-    note.textContent = "Bitte eine GAEB-Datei als D81, D83, P81, P83, X80–X86, X89 oder XML auswählen.";
+    note.textContent = "Bitte eine GAEB-Datei als D81, D83, D84, P81, P83, P84, X80–X86, X89 oder XML auswählen.";
     return;
   }
   if (file.size > limit) {

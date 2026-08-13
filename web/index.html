@@ -10,10 +10,10 @@
     <meta name="theme-color" content="#f4f2e9" />
     <title>LV Konverter · PDF und GAEB lesbar austauschen</title>
     <link rel="icon" type="image/png" href="/assets/gaeb-konverter-icon.png?v=2" />
-    <link rel="stylesheet" href="/styles.css?v=14" />
+    <link rel="stylesheet" href="/styles.css?v=15" />
     <script src="/offer.js?v=2" defer></script>
-    <script src="/app.js?v=13" defer></script>
-    <script src="/consent.js" defer></script>
+    <script src="/app.js?v=14" defer></script>
+    <script src="/consent.js?v=2" defer></script>
   </head>
   <body>
     <aside class="offer-banner" id="offer-banner" hidden></aside>
@@ -156,6 +156,28 @@
         </section>
       </section>
 
+      <section class="reel-section" aria-labelledby="reel-title">
+        <div class="reel-copy">
+          <p class="eyebrow">GAEB in Bewegung</p>
+          <h2 id="reel-title">Vom Leistungsverzeichnis zur weiterverarbeitbaren Datei.</h2>
+          <p>
+            Sehen Sie, wie GAEB.hawkvision.de den Austausch zwischen PDF und GAEB
+            einfacher macht.
+          </p>
+        </div>
+        <div class="reel-player">
+          <video
+            controls
+            playsinline
+            preload="metadata"
+            aria-label="GAEB.hawkvision.de Produkt-Reel"
+          >
+            <source src="/assets/gaeb-hawk-vision-3d-loft-reel.mp4" type="video/mp4" />
+            Ihr Browser unterstützt die Wiedergabe dieses Videos nicht.
+          </video>
+        </div>
+      </section>
+
       <section class="how-it-works" aria-labelledby="how-title">
         <div>
           <p class="eyebrow">Ein klarer Ablauf</p>
@@ -184,7 +206,7 @@
             <p class="regular-price" id="pro-regular-row">Regulär <del id="pro-regular-price">19,00 €</del></p>
             <h3><span id="pro-price">12,99 €</span> <small>netto / Monat</small></h3>
             <p>100 Konvertierungen monatlich für PDF → GAEB und GAEB → PDF, bis 25 MB je Datei und insgesamt 2 GB Speicher.</p>
-            <form class="checkout-form" data-offer="pro">
+            <form class="checkout-form" data-offer="pro" novalidate>
               <label><span>E-Mail</span><input type="email" name="email" required autocomplete="email" /></label>
               <button class="primary-button checkout-button" type="submit">Pro starten</button>
               <p class="checkout-note" aria-live="polite"></p>

@@ -1,15 +1,12 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use gaeb_toolkit::{
     apply_provisional_flags,
     export::{write_json, write_master_xml},
-    gaeb_document_to_boq, inject_pdf_pngs, parse_pdf, read_gaeb, write_gaeb_pdf, write_x83,
-    write_x83_priced, write_x84,
+    gaeb_document_to_boq, inject_pdf_pngs, parse_pdf, read_gaeb, write_d84, write_gaeb_pdf,
+    write_p84, write_x83, write_x83_priced, write_x84,
 };
 
 #[derive(Debug, Parser)]
@@ -54,6 +51,12 @@ enum Command {
         /// Als modernes GAEB DA XML X83 schreiben.
         #[arg(long)]
         x83: Option<PathBuf>,
+        /// Als GAEB DA 2000 P84-Angebotsabgabe schreiben (Preise erforderlich).
+        #[arg(long)]
+        p84: Option<PathBuf>,
+        /// Als GAEB 90 D84-Angebotsabgabe schreiben (Preise erforderlich).
+        #[arg(long)]
+        d84: Option<PathBuf>,
     },
 }
 
@@ -84,18 +87,16 @@ fn main() -> Result<()> {
 
             match (x84, x83_priced) {
                 (Some(x84_path), Some(x83_path)) => {
-                    // Beide Preisformate haben denselben LV-Inhalt. Bilder werden
-                    // nur einmal extrahiert; danach werden Namespace und DP für die
-                    // zusätzliche X83 angepasst. Das spart einen pdftohtml-Lauf.
+                    // Die X84 bleibt als kompakter Angebotsrücklauf text- und bildfrei;
+                    // die ausdrücklich gewünschte bepreiste X83 behält den LV-Inhalt.
                     write_x84(&boq, &x84_path, allow_conflicts)?;
-                    embed_images(&input, &x84_path, &boq, "X84")?;
                     apply_provisional(&x84_path, &boq, "X84")?;
-                    derive_priced_x83(&x84_path, &x83_path)?;
-                    eprintln!("X83 mit Preisen aus der X84 abgeleitet.");
+                    write_x83_priced(&boq, &x83_path, allow_conflicts)?;
+                    embed_images(&input, &x83_path, &boq, "X83 mit Preisen")?;
+                    apply_provisional(&x83_path, &boq, "X83 mit Preisen")?;
                 }
                 (Some(path), None) => {
                     write_x84(&boq, &path, allow_conflicts)?;
-                    embed_images(&input, &path, &boq, "X84")?;
                     apply_provisional(&path, &boq, "X84")?;
                 }
                 (None, Some(path)) => {
@@ -118,10 +119,16 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::ConvertGaeb { input, pdf, x83 } => {
+        Command::ConvertGaeb {
+            input,
+            pdf,
+            x83,
+            p84,
+            d84,
+        } => {
             let document = read_gaeb(&input)?;
-            if pdf.is_none() && x83.is_none() {
-                anyhow::bail!("Mindestens --pdf oder --x83 angeben.");
+            if pdf.is_none() && x83.is_none() && p84.is_none() && d84.is_none() {
+                anyhow::bail!("Mindestens --pdf, --x83, --p84 oder --d84 angeben.");
             }
             if let Some(path) = pdf {
                 write_gaeb_pdf(&document, path)?;
@@ -129,6 +136,12 @@ fn main() -> Result<()> {
             if let Some(path) = x83 {
                 let boq = gaeb_document_to_boq(&document);
                 write_x83(&boq, path, false)?;
+            }
+            if let Some(path) = p84 {
+                write_p84(&document, path)?;
+            }
+            if let Some(path) = d84 {
+                write_d84(&document, path)?;
             }
             eprintln!(
                 "GAEB Phase {} mit {} Struktureinträgen gelesen.",
@@ -162,23 +175,5 @@ fn apply_provisional(
     if count > 0 {
         eprintln!("{count} Eventualposition(en) in der {label} als 'WithoutTotal' markiert.");
     }
-    Ok(())
-}
-
-fn derive_priced_x83(x84_path: &Path, x83_path: &Path) -> Result<()> {
-    let source = fs::read_to_string(x84_path)
-        .with_context(|| format!("X84 konnte nicht gelesen werden: {}", x84_path.display()))?;
-    let converted = source
-        .replace(
-            "http://www.gaeb.de/GAEB_DA_XML/DA84/3.3",
-            "http://www.gaeb.de/GAEB_DA_XML/DA83/3.3",
-        )
-        .replace("<DP>84</DP>", "<DP>83</DP>");
-    fs::write(x83_path, converted).with_context(|| {
-        format!(
-            "X83 mit Preisen konnte nicht geschrieben werden: {}",
-            x83_path.display()
-        )
-    })?;
     Ok(())
 }

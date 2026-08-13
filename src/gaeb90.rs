@@ -8,7 +8,7 @@ use crate::{
     model::{BillOfQuantities, Node, Position},
 };
 
-/// Liest GAEB-90-Dateien der Phasen D81 und D83.
+/// Liest GAEB-90-Dateien der Phasen D81, D83 und D84.
 ///
 /// GAEB 90 verwendet 80 Zeichen breite Datensätze im DOS-Zeichensatz CP850.
 /// Die Ordnungszahl wird anhand der neunstelligen OZ-Maske aus Satzart 00
@@ -41,7 +41,7 @@ fn parse_gaeb_90(source: &str, text: &str) -> Result<GaebDocument> {
     }
     let phase_field = field(header, 10, 12);
     let phase = phase_field.trim();
-    if !matches!(phase, "81" | "83") {
+    if !matches!(phase, "81" | "83" | "84") {
         bail!("GAEB-90-Phase D{phase} wird noch nicht unterstützt.");
     }
     let oz_mask = field(header, 62, 71);
@@ -105,6 +105,16 @@ fn parse_gaeb_90(source: &str, text: &str) -> Result<GaebDocument> {
                     oz: format_oz(&field(record, 2, 11), &oz_mask),
                     quantity: parse_implied_decimal(&field(record, 23, 34), 3),
                     unit: field(record, 34, 38).trim().to_owned(),
+                    ..GaebItem::default()
+                });
+            }
+            "23" if phase == "84" => {
+                finish_item(&mut document.rows, &mut active_item);
+                active_category = None;
+                active_item = Some(GaebItem {
+                    oz: format_oz(&field(record, 2, 11), &oz_mask),
+                    unit_price: parse_implied_decimal(&field(record, 13, 24), 3),
+                    total_price: parse_implied_decimal(&field(record, 25, 37), 2),
                     ..GaebItem::default()
                 });
             }

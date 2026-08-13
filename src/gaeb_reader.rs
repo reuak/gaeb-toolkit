@@ -74,6 +74,10 @@ pub fn read_gaeb_xml(path: impl AsRef<Path>) -> Result<GaebDocument> {
     let mut categories = Vec::<String>::new();
     let mut active_category: Option<usize> = None;
     let mut item: Option<GaebItem> = None;
+    let mut category_lengths = Vec::<usize>::new();
+    let mut item_length = None::<usize>;
+    let mut breakdown_type = String::new();
+    let mut breakdown_length = None::<usize>;
     let mut saw_gaeb = false;
 
     loop {
@@ -81,8 +85,14 @@ pub fn read_gaeb_xml(path: impl AsRef<Path>) -> Result<GaebDocument> {
             Event::Start(event) => {
                 let name = local_name(event.name().as_ref());
                 saw_gaeb |= name == "GAEB";
-                if name == "BoQCtgy" {
-                    let part = attribute(&event, b"RNoPart")?.unwrap_or_default();
+                if name == "BoQBkdn" {
+                    breakdown_type.clear();
+                    breakdown_length = None;
+                } else if name == "BoQCtgy" {
+                    let part = normalized_rno_part(
+                        &attribute(&event, b"RNoPart")?.unwrap_or_default(),
+                        category_lengths.get(categories.len()).copied(),
+                    );
                     categories.push(part);
                     let index = document.rows.len();
                     document.rows.push(GaebRow::Category {
@@ -92,7 +102,10 @@ pub fn read_gaeb_xml(path: impl AsRef<Path>) -> Result<GaebDocument> {
                     });
                     active_category = Some(index);
                 } else if name == "Item" {
-                    let part = attribute(&event, b"RNoPart")?.unwrap_or_default();
+                    let part = normalized_rno_part(
+                        &attribute(&event, b"RNoPart")?.unwrap_or_default(),
+                        item_length,
+                    );
                     let mut oz_parts = categories.clone();
                     oz_parts.push(part);
                     item = Some(GaebItem {
@@ -115,6 +128,12 @@ pub fn read_gaeb_xml(path: impl AsRef<Path>) -> Result<GaebDocument> {
                         item.as_mut(),
                         &text,
                     );
+                    apply_breakdown_text(
+                        &elements,
+                        &text,
+                        &mut breakdown_type,
+                        &mut breakdown_length,
+                    );
                 }
             }
             Event::CData(event) => {
@@ -127,13 +146,33 @@ pub fn read_gaeb_xml(path: impl AsRef<Path>) -> Result<GaebDocument> {
                         item.as_mut(),
                         &text,
                     );
+                    apply_breakdown_text(
+                        &elements,
+                        &text,
+                        &mut breakdown_type,
+                        &mut breakdown_length,
+                    );
                 }
             }
             Event::End(event) => {
                 let name = local_name(event.name().as_ref());
                 if name == "Item" {
-                    if let Some(position) = item.take() {
+                    if let Some(mut position) = item.take() {
+                        if document.exchange_phase == "84"
+                            && position.total_price.is_none()
+                            && position.unit_price == Some(Decimal::ZERO)
+                        {
+                            position.total_price = Some(Decimal::ZERO);
+                        }
                         document.rows.push(GaebRow::Item(position));
+                    }
+                } else if name == "BoQBkdn" {
+                    if let Some(length) = breakdown_length {
+                        match breakdown_type.as_str() {
+                            "BoQLevel" => category_lengths.push(length),
+                            "Item" => item_length = Some(length),
+                            _ => {}
+                        }
                     }
                 } else if name == "BoQCtgy" {
                     categories.pop();
@@ -168,6 +207,32 @@ pub fn read_gaeb_xml(path: impl AsRef<Path>) -> Result<GaebDocument> {
         bail!("Die GAEB-Datei enthält keine lesbaren LV-Positionen.");
     }
     Ok(document)
+}
+
+fn apply_breakdown_text(
+    elements: &[String],
+    text: &str,
+    breakdown_type: &mut String,
+    breakdown_length: &mut Option<usize>,
+) {
+    if !elements.iter().any(|element| element == "BoQBkdn") {
+        return;
+    }
+    match elements.last().map(String::as_str) {
+        Some("Type") => *breakdown_type = text.to_owned(),
+        Some("Length") => *breakdown_length = text.parse().ok(),
+        _ => {}
+    }
+}
+
+fn normalized_rno_part(value: &str, length: Option<usize>) -> String {
+    let value = value.trim();
+    match length {
+        Some(length) if value.len() < length && value.bytes().all(|byte| byte.is_ascii_digit()) => {
+            format!("{value:0>length$}")
+        }
+        _ => value.to_owned(),
+    }
 }
 
 fn apply_text(
@@ -477,6 +542,7 @@ fn printable(value: &str) -> String {
 mod tests {
     use std::fs;
 
+    use rust_decimal::Decimal;
     use tempfile::tempdir;
 
     use super::{read_gaeb_xml, write_gaeb_pdf, GaebRow};
@@ -538,5 +604,32 @@ mod tests {
         let document = read_gaeb_xml(&input).unwrap();
         assert_eq!(document.exchange_phase, "81");
         assert!(matches!(document.rows[0], GaebRow::Category { .. }));
+    }
+
+    #[test]
+    fn normalizes_novaava_rno_parts_and_missing_zero_total() {
+        let directory = tempdir().unwrap();
+        let input = directory.path().join("nova.x84");
+        fs::write(
+            &input,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<GAEB xmlns="http://www.gaeb.de/GAEB_DA_XML/DA84/3.3">
+ <Award><DP>84</DP><BoQ><BoQInfo>
+  <BoQBkdn><Type>BoQLevel</Type><Length>2</Length></BoQBkdn>
+  <BoQBkdn><Type>BoQLevel</Type><Length>2</Length></BoQBkdn>
+  <BoQBkdn><Type>Item</Type><Length>3</Length></BoQBkdn>
+ </BoQInfo><BoQBody><BoQCtgy RNoPart="1"><BoQBody><BoQCtgy RNoPart="3">
+  <BoQBody><Itemlist><Item RNoPart="9"><UP>0.000</UP></Item></Itemlist></BoQBody>
+ </BoQCtgy></BoQBody></BoQCtgy></BoQBody></BoQ></Award>
+</GAEB>"#,
+        )
+        .unwrap();
+        let document = read_gaeb_xml(&input).unwrap();
+        let GaebRow::Item(item) = &document.rows[2] else {
+            panic!("Position erwartet")
+        };
+        assert_eq!(item.oz, "01.03.009");
+        assert_eq!(item.unit_price, Some(Decimal::ZERO));
+        assert_eq!(item.total_price, Some(Decimal::ZERO));
     }
 }
