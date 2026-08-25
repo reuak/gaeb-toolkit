@@ -36,7 +36,14 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> Result<BillOfQuantities> {
 }
 
 pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
-    let two_part_positions = find_two_part_position_oz(text)?;
+    let short_three_part_positions = find_short_three_part_position_oz(text)?;
+    let mut two_part_positions = find_two_part_position_oz(text)?;
+    two_part_positions.retain(|oz| {
+        let child_prefix = format!("{oz}.");
+        !short_three_part_positions
+            .iter()
+            .any(|candidate| candidate.starts_with(&child_prefix))
+    });
     let heading_re = Regex::new(r"^(?P<oz>\d+(?:\.\d+){0,4})(?P<trailing>\.)?\s+(?P<title>\S.*)$")?;
     let position_start_re =
         Regex::new(r"^(?P<oz>\d+(?:\.\d+){1,5})(?P<trailing>\.)?(?:\s+(?P<rest>.*))?$")?;
@@ -98,6 +105,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                     six_part_profile,
                     short_four_part_profile,
                     &two_part_positions,
+                    &short_three_part_positions,
                 )
             }) {
                 finish_position(
@@ -245,7 +253,7 @@ fn find_two_part_position_oz(text: &str) -> Result<HashSet<String>> {
     let candidate_re =
         Regex::new(r"^(?P<indent>\s*)(?P<parent>\d+)\.(?P<item>\d{1,3})(?P<rest>\s+\S.*)$")?;
     let multi_part_oz_re = Regex::new(r"^(?P<oz>\d+(?:\.\d+){2,5})\.?\s+\S")?;
-    let quantity_re = Regex::new(r"^\d[\d.]*(?:,\d{1,3})?\s+\S+")?;
+    let quantity_re = bare_quantity_regex()?;
     let lines = text.lines().collect::<Vec<_>>();
     let normalized_lines = lines
         .iter()
@@ -276,6 +284,44 @@ fn find_two_part_position_oz(text: &str) -> Result<HashSet<String>> {
     }
 
     Ok(positions)
+}
+
+/// Manche funktionalen LVs verwenden kurze dreistufige OZ wie `1.2.3`, ohne
+/// den sonst üblichen abschließenden Punkt. Sie werden nur dann als Position
+/// gewertet, wenn vor der nächsten OZ eine eigenständige Mengenzeile folgt.
+/// Dadurch bleiben gleich aufgebaute Nummerierungen in Vorbemerkungen normale
+/// Überschriften beziehungsweise Fließtext.
+fn find_short_three_part_position_oz(text: &str) -> Result<HashSet<String>> {
+    let candidate_re = Regex::new(r"^\s*(?P<oz>\d{1,3}\.\d{1,3}\.\d{1,3})(?P<rest>\s+\S.*)$")?;
+    let next_oz_re = Regex::new(r"^\d+(?:\.\d+){1,5}\.?\s+\S")?;
+    let quantity_re = bare_quantity_regex()?;
+    let lines = text.lines().map(normalize_line).collect::<Vec<_>>();
+    let mut positions = HashSet::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let Some(captures) = candidate_re.captures(line) else {
+            continue;
+        };
+        let oz = captures["oz"].to_owned();
+        if is_date_like_oz(&oz.split('.').collect::<Vec<_>>()) {
+            continue;
+        }
+        let has_quantity = lines[index + 1..]
+            .iter()
+            .take_while(|following| !next_oz_re.is_match(following))
+            .any(|following| quantity_re.is_match(following));
+        if has_quantity {
+            positions.insert(oz);
+        }
+    }
+
+    Ok(positions)
+}
+
+fn bare_quantity_regex() -> Result<Regex, regex::Error> {
+    Regex::new(
+        r"(?i)^(?P<qty>\d[\d.]*(?:,\d{1,3})?)\s+(?P<unit>m²|m2|m³|m3|m|cm|mm|km|Stück|Stck|Stk|St|Pauschal|psch|kg|t|l|lfm|qm|Std|h)(?:\s|$)",
+    )
 }
 
 fn has_short_four_part_positions(
@@ -327,6 +373,7 @@ fn is_position_oz(
     six_part_profile: bool,
     short_four_part_profile: bool,
     two_part_positions: &HashSet<String>,
+    short_three_part_positions: &HashSet<String>,
 ) -> bool {
     let components = caps["oz"].split('.').collect::<Vec<_>>();
     if is_date_like_oz(&components) {
@@ -340,7 +387,11 @@ fn is_position_oz(
     }
     match components.len() {
         2 => two_part_positions.contains(&caps["oz"]),
-        3 => caps.name("trailing").is_some() || components[2].len() >= 3,
+        3 => {
+            caps.name("trailing").is_some()
+                || components[2].len() >= 3
+                || short_three_part_positions.contains(&caps["oz"])
+        }
         4 => components[3].len() >= 3,
         6 => true,
         _ => false,
@@ -413,23 +464,42 @@ fn extract_trailing_quantity(position: &mut Position, lines: &mut Vec<String>) {
     let Ok(quantity_re) = trailing_quantity_regex() else {
         return;
     };
-    let Some((index, caps)) = lines
+    if let Some((index, caps)) = lines
         .iter()
         .enumerate()
         .find_map(|(index, line)| quantity_re.captures(line).map(|caps| (index, caps)))
+    {
+        let match_start = caps.get(0).map(|value| value.start()).unwrap_or_default();
+        position.quantity = parse_decimal(caps.name("qty").map(|value| value.as_str()));
+        position.unit = caps.name("unit").map(|value| value.as_str().to_owned());
+        position.unit_price = parse_decimal(caps.name("ep").map(|value| value.as_str()));
+        position.total_price = parse_decimal(caps.name("gb").map(|value| value.as_str()));
+        position.provisional |= caps.name("price_only").is_some();
+        position.price_only |= caps.name("price_only").is_some();
+        remove_matched_quantity(lines, index, match_start);
+        return;
+    }
+
+    let Ok(bare_re) = bare_quantity_regex() else {
+        return;
+    };
+    let Some((index, caps)) = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, line)| bare_re.captures(line).map(|caps| (index, caps)))
     else {
         return;
     };
-
+    let match_start = caps.get(0).map(|value| value.start()).unwrap_or_default();
     position.quantity = parse_decimal(caps.name("qty").map(|value| value.as_str()));
     position.unit = caps.name("unit").map(|value| value.as_str().to_owned());
-    position.unit_price = parse_decimal(caps.name("ep").map(|value| value.as_str()));
-    position.total_price = parse_decimal(caps.name("gb").map(|value| value.as_str()));
-    position.provisional |= caps.name("price_only").is_some();
-    position.price_only |= caps.name("price_only").is_some();
-    let prefix = caps
-        .get(0)
-        .and_then(|matched| lines[index].get(..matched.start()))
+    remove_matched_quantity(lines, index, match_start);
+}
+
+fn remove_matched_quantity(lines: &mut Vec<String>, index: usize, match_start: usize) {
+    let prefix = lines[index]
+        .get(..match_start)
         .unwrap_or_default()
         .trim()
         .to_owned();
@@ -935,6 +1005,33 @@ Abbrechen und fachgerechtes Entsorgen einer Deckenkleidung.\n\
         assert_eq!(position.unit.as_deref(), Some("m²"));
         assert_eq!(position.unit_price, Some(Decimal::new(940, 2)));
         assert_eq!(position.total_price, Some(Decimal::new(488800, 2)));
+    }
+
+    #[test]
+    fn parses_short_three_part_oz_with_quantity_after_long_text() {
+        let text = "Leistungsverzeichnis\n\
+1 Decken\n\
+1.1 Trockenbaudecken\n\
+1.1.1 Abgehängte Decke, feuchtraumgeeignet\n\
+Liefern und montieren nach Ausführungsplanung.\n\
+Plattenstärke:\n\
+60 mm\n\
+Einbauort: WC\n\
+55 m²\n\
+1.1.2 Mineralfaserdecke, weiß\n\
+Unterkonstruktion und Platten liefern und einbauen.\n\
+70 m²\n";
+        let boq = parse_text("funktionales-lv.pdf", text).unwrap();
+        let positions = &boq.roots[0].children[0].positions;
+
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0].oz, "1.1.1");
+        assert_eq!(positions[0].quantity, Some(Decimal::new(55, 0)));
+        assert_eq!(positions[0].unit.as_deref(), Some("m²"));
+        assert_eq!(positions[1].oz, "1.1.2");
+        assert_eq!(positions[1].quantity, Some(Decimal::new(70, 0)));
+        assert_eq!(positions[1].unit.as_deref(), Some("m²"));
+        assert!(!positions[0].long_text.contains("1.1.2"));
     }
 
     #[test]
