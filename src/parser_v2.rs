@@ -419,9 +419,11 @@ fn is_heading_oz(caps: &regex::Captures<'_>, position_active: bool) -> bool {
         components.iter().all(|component| component.len() <= 2)
             && !(position_active && components.len() == 1)
     } else {
-        components.len() <= 3
-            && components.iter().all(|component| component.len() == 2)
-            && !(position_active && components.len() == 1)
+        if components.len() == 1 {
+            !position_active
+        } else {
+            components.len() <= 3 && components.iter().all(|component| component.len() == 2)
+        }
     }
 }
 
@@ -1024,6 +1026,7 @@ Unterkonstruktion und Platten liefern und einbauen.\n\
         let boq = parse_text("funktionales-lv.pdf", text).unwrap();
         let positions = &boq.roots[0].children[0].positions;
 
+        assert_eq!(boq.roots[0].title, "Decken");
         assert_eq!(positions.len(), 2);
         assert_eq!(positions[0].oz, "1.1.1");
         assert_eq!(positions[0].quantity, Some(Decimal::new(55, 0)));
