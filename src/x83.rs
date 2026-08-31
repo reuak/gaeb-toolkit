@@ -181,6 +181,10 @@ fn write_category<W: std::io::Write>(
     write_rich_text(writer, "LblTx", &clean_title)?;
     writer.write_event(Event::Start(BytesStart::new("BoQBody")))?;
 
+    if !node.intro_text.trim().is_empty() {
+        write_remark(writer, &node.intro_text, ids)?;
+    }
+
     for child in &node.children {
         write_category(writer, child, ids)?;
     }
@@ -195,6 +199,26 @@ fn write_category<W: std::io::Write>(
 
     writer.write_event(Event::End(BytesEnd::new("BoQBody")))?;
     writer.write_event(Event::End(BytesEnd::new("BoQCtgy")))?;
+    Ok(())
+}
+
+fn write_remark<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    value: &str,
+    ids: &mut IdGenerator,
+) -> Result<()> {
+    let id = ids.next();
+    let mut start = BytesStart::new("Remark");
+    start.push_attribute(("ID", id.as_str()));
+    writer.write_event(Event::Start(start))?;
+    writer.write_event(Event::Start(BytesStart::new("Description")))?;
+    writer.write_event(Event::Start(BytesStart::new("CompleteText")))?;
+    writer.write_event(Event::Start(BytesStart::new("DetailTxt")))?;
+    write_text_block(writer, "Text", value)?;
+    writer.write_event(Event::End(BytesEnd::new("DetailTxt")))?;
+    writer.write_event(Event::End(BytesEnd::new("CompleteText")))?;
+    writer.write_event(Event::End(BytesEnd::new("Description")))?;
+    writer.write_event(Event::End(BytesEnd::new("Remark")))?;
     Ok(())
 }
 
@@ -358,6 +382,7 @@ mod tests {
         boq.roots.push(Node {
             oz: "01".into(),
             title: "Bereich".into(),
+            intro_text: "Allgemeiner Hinweis zum Bereich".into(),
             level: 1,
             children: vec![Node {
                 oz: "01.02".into(),
@@ -394,6 +419,8 @@ mod tests {
         assert!(xml.contains("<Qty>12.5</Qty>"));
         assert!(xml.contains("<span>Kurztext</span>"));
         assert!(xml.contains("<span>Langtext</span>"));
+        assert!(xml.contains("<Remark ID="));
+        assert!(xml.contains("<span>Allgemeiner Hinweis zum Bereich</span>"));
         assert!(!xml.contains("<UP>"));
     }
 

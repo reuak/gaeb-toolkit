@@ -228,6 +228,7 @@ fn ensure_path<'a>(
             nodes.push(Node {
                 oz: oz.clone(),
                 title: heading.map(|(title, _)| title.clone()).unwrap_or_default(),
+                intro_text: String::new(),
                 level: index + 1,
                 page: Some(heading.map(|(_, page)| *page).unwrap_or(fallback_page)),
                 children: Vec::new(),

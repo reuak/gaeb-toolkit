@@ -72,6 +72,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     let mut document_finished = false;
     let mut pending_provisional = false;
     let mut pending_wrapped_heading: Option<String> = None;
+    let mut active_heading_oz: Option<String> = None;
 
     for (page_index, page) in text.split('\u{000C}').enumerate() {
         let page_number = page_index + 1;
@@ -213,6 +214,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                         &headings,
                         page_number,
                     );
+                    active_heading_oz = Some(heading_oz);
                 }
                 continue;
             }
@@ -252,6 +254,12 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                     "Fortsetzung von vorheriger Seite" | "Fortsetzung auf nächster Seite"
                 ) {
                     position_lines.push(line);
+                }
+            } else if in_lv_table {
+                if let Some(heading_oz) = active_heading_oz.as_deref() {
+                    append_heading_intro(&mut boq.roots, heading_oz, &line);
+                } else if page_number < 15 {
+                    preamble_lines.push(line);
                 }
             } else if page_number < 15 {
                 preamble_lines.push(line);
@@ -334,6 +342,9 @@ fn find_two_part_position_oz(text: &str) -> Result<HashSet<String>> {
         let has_quantity = normalized_lines[index + 1..]
             .iter()
             .take_while(|line| {
+                if quantity_re.is_match(line) {
+                    return true;
+                }
                 if candidate_re.is_match(line) {
                     return false;
                 }
@@ -376,7 +387,9 @@ fn find_short_three_part_position_oz(text: &str) -> Result<HashSet<String>> {
         let has_quantity = inline_price_only_re.is_match(&captures["rest"])
             || lines[index + 1..]
                 .iter()
-                .take_while(|following| !next_oz_re.is_match(following))
+                .take_while(|following| {
+                    quantity_re.is_match(following) || !next_oz_re.is_match(following)
+                })
                 .any(|following| quantity_re.is_match(following));
         if has_quantity {
             positions.insert(oz);
@@ -868,6 +881,7 @@ fn ensure_path<'a>(
             nodes.push(Node {
                 oz: current_oz,
                 title,
+                intro_text: String::new(),
                 level: index + 1,
                 page: Some(page),
                 children: Vec::new(),
@@ -895,6 +909,22 @@ fn ensure_path<'a>(
         headings,
         fallback_page,
     )
+}
+
+fn append_heading_intro(nodes: &mut [Node], heading_oz: &str, line: &str) -> bool {
+    for node in nodes {
+        if node.oz == heading_oz {
+            if !node.intro_text.is_empty() {
+                node.intro_text.push('\n');
+            }
+            node.intro_text.push_str(line);
+            return true;
+        }
+        if append_heading_intro(&mut node.children, heading_oz, line) {
+            return true;
+        }
+    }
+    false
 }
 
 fn apply_heading_titles(nodes: &mut [Node], headings: &HeadingMap) {
@@ -1381,6 +1411,61 @@ Menge EP (netto) Gesamt (netto)\n\
         assert_eq!(boq.roots[0].children[0].title, "Vorbereitende Maßnahmen");
         assert!(boq.roots[0].children[0].positions.is_empty());
         assert_eq!(boq.roots[1].oz, "2");
+    }
+
+    #[test]
+    fn keeps_heading_intro_separate_from_positions() {
+        let text = "Menge EP (netto) Gesamt (netto)\n\
+1 Malerarbeiten\n\
+g Beschichtungssystem/Hersteller\n\
+Folgende Systeme wurden angeboten.\n\
+1.1 Wände\n\
+Hinweise zur Ausführung der Wandbeschichtung.\n\
+1.1.1 Dispersionsanstrich\n\
+Positionstext bleibt an der Position.\n\
+10 m²\n";
+        let boq = parse_text("maler.pdf", text).unwrap();
+
+        assert_eq!(
+            boq.roots[0].intro_text,
+            "g Beschichtungssystem/Hersteller\nFolgende Systeme wurden angeboten."
+        );
+        assert_eq!(
+            boq.roots[0].children[0].intro_text,
+            "Hinweise zur Ausführung der Wandbeschichtung."
+        );
+        let position = &boq.roots[0].children[0].positions[0];
+        assert_eq!(position.short_text, "Dispersionsanstrich");
+        assert_eq!(position.long_text, "Positionstext bleibt an der Position.");
+        assert!(!boq.preamble.contains("Beschichtungssystem"));
+    }
+
+    #[test]
+    fn recognizes_thousands_quantity_as_quantity_not_oz() {
+        let text = "Menge EP (netto) Gesamt (netto)\n\
+1 Malerarbeiten\n\
+1.2 Decken\n\
+1.2.1 Untergrund reinigen\n\
+Reinigung durchführen.\n\
+1 Pauschal\n\
+1.2.2 Dispersionsbeschichtung Decken\n\
+Beschichtung einschließlich vollständiger fachgerechter Vorbehandlung.\n\
+1.350 m²\n\
+1.2.3 Dispersionsbeschichtung Wände\n\
+Wandflächen beschichten.\n\
+141 m²\n";
+        let boq = parse_text("maler.pdf", text).unwrap();
+        let positions = &boq.roots[0].children[0].positions;
+
+        assert_eq!(positions.len(), 3);
+        assert_eq!(positions[1].oz, "1.2.2");
+        assert_eq!(positions[1].quantity, Some(Decimal::new(1350, 0)));
+        assert_eq!(positions[1].unit.as_deref(), Some("m²"));
+        assert_eq!(positions[1].short_text, "Dispersionsbeschichtung Decken");
+        assert_eq!(
+            positions[1].long_text,
+            "Beschichtung einschließlich vollständiger fachgerechter Vorbehandlung."
+        );
     }
 
     #[test]

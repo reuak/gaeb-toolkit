@@ -20,6 +20,8 @@ pub struct Position {
 pub struct Node {
     pub oz: String,
     pub title: String,
+    #[serde(default)]
+    pub intro_text: String,
     pub level: usize,
     pub page: Option<usize>,
     pub children: Vec<Node>,
