@@ -3,6 +3,7 @@ use std::{
     path::Path,
     process::Command,
     str::FromStr,
+    sync::LazyLock,
 };
 
 use anyhow::{bail, Context, Result};
@@ -12,6 +13,9 @@ use rust_decimal::Decimal;
 use crate::model::{BillOfQuantities, Node, Position};
 
 type HeadingMap = HashMap<String, (String, usize)>;
+
+static HTML_BREAK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)<br\s*/?>").expect("statischer BR-Ausdruck ist gültig"));
 
 pub fn parse_pdf(path: impl AsRef<Path>) -> Result<BillOfQuantities> {
     let path = path.as_ref();
@@ -50,11 +54,13 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     let six_part_profile_re = Regex::new(r"(?m)^\s*\d+(?:\.\d+){5}\s+\S")?;
     let six_part_profile = six_part_profile_re.is_match(text);
     let priced_data_re = priced_data_regex()?;
+    let bare_quantity_line_re = bare_quantity_regex()?;
+    let trailing_quantity_line_re = trailing_quantity_regex()?;
     let short_four_part_profile =
         has_short_four_part_positions(text, &position_start_re, &priced_data_re);
     let sum_re = Regex::new(r"^Summe\s+\d+(?:\.\d+){1,5}\.?(?:\s|$)")?;
     let footer_re = Regex::new(
-        r"^(?:Druckausgabe vom:.*|\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}.*)\d+\s*/\s*\d+\s*$",
+        r"^(?:Druckausgabe vom:.*|\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}.*)\d+\s*/\s*\d+\s*$|^Stand\s+\d{2}\.\d{2}\.\d{4}\s+Seite\s+\d+\s*/\s*\d+\s*$",
     )?;
 
     let mut boq = BillOfQuantities::new(source);
@@ -65,6 +71,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
     let mut last_content_page = 1usize;
     let mut document_finished = false;
     let mut pending_provisional = false;
+    let mut pending_wrapped_heading: Option<String> = None;
 
     for (page_index, page) in text.split('\u{000C}').enumerate() {
         let page_number = page_index + 1;
@@ -80,6 +87,7 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
             .iter()
             .position(|line| line.starts_with("OZ Leistungsbeschreibung"))
             .filter(|header_index| first_oz_index.is_none_or(|oz_index| *header_index < oz_index));
+        let mut in_lv_table = table_header_index.is_some();
 
         for (line_index, line) in page_lines.into_iter().enumerate() {
             if document_finished {
@@ -94,7 +102,35 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                 continue;
             }
 
-            if line.eq_ignore_ascii_case("*** Bedarfsposition nachrichtlicher GB") {
+            // Manche Ausschreibungs-PDFs beginnen die eigentliche LV-Tabelle
+            // nur mit den Preisspalten statt mit "OZ Leistungsbeschreibung".
+            // Erst ab diesem eindeutigen Tabellenkopf dürfen auch leere
+            // Bereiche/Titel materialisiert werden; nummerierte Vorbemerkungen
+            // bleiben dadurch weiterhin außerhalb der LV-Hierarchie.
+            if is_lv_column_header(&line) {
+                in_lv_table = true;
+                continue;
+            }
+
+            if let Some(heading_oz) = pending_wrapped_heading.take() {
+                let structural_line = position_start_re.is_match(&line)
+                    || heading_re.is_match(&line)
+                    || is_document_total(&line)
+                    || sum_re.is_match(&line)
+                    || line.to_lowercase().contains("eventualposition");
+                if !structural_line {
+                    if let Some((title, _)) = headings.get_mut(&heading_oz) {
+                        title.push(' ');
+                        title.push_str(&line);
+                    }
+                    continue;
+                }
+            }
+
+            if line.eq_ignore_ascii_case("*** Bedarfsposition nachrichtlicher GB")
+                || (line.to_lowercase().contains("eventualposition")
+                    && line.to_lowercase().contains("ohne gesamtpreis"))
+            {
                 pending_provisional = true;
                 continue;
             }
@@ -135,10 +171,18 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                 continue;
             }
 
-            if let Some(caps) = heading_re
-                .captures(&line)
-                .filter(|caps| is_heading_oz(caps, current_position.is_some()))
-            {
+            if let Some(caps) = heading_re.captures(&line).filter(|caps| {
+                let current_has_quantity = position_lines.iter().any(|position_line| {
+                    bare_quantity_line_re.is_match(position_line)
+                        || trailing_quantity_line_re.is_match(position_line)
+                });
+                is_heading_oz(
+                    caps,
+                    current_position.is_some(),
+                    in_lv_table,
+                    current_has_quantity,
+                )
+            }) {
                 finish_position(
                     &mut boq,
                     &headings,
@@ -146,8 +190,9 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                     &mut position_lines,
                     page_number,
                 );
+                let heading_oz = caps["oz"].to_owned();
                 headings.insert(
-                    caps["oz"].to_owned(),
+                    heading_oz.clone(),
                     (
                         caps.name("title")
                             .map(|v| v.as_str().trim().to_owned())
@@ -155,6 +200,20 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                         page_number,
                     ),
                 );
+                if headings
+                    .get(&heading_oz)
+                    .is_some_and(|(title, _)| title.to_lowercase().ends_with(" als"))
+                {
+                    pending_wrapped_heading = Some(heading_oz.clone());
+                }
+                if in_lv_table {
+                    ensure_hierarchy_from_position(
+                        &mut boq.roots,
+                        &heading_oz,
+                        &headings,
+                        page_number,
+                    );
+                }
                 continue;
             }
 
@@ -233,6 +292,13 @@ fn is_document_total(line: &str) -> bool {
     .any(|marker| normalized.starts_with(marker))
 }
 
+fn is_lv_column_header(line: &str) -> bool {
+    let normalized = line.to_lowercase();
+    normalized.contains("menge")
+        && normalized.contains("ep")
+        && (normalized.contains("gesamt") || normalized.contains("gp"))
+}
+
 fn priced_data_regex() -> Result<Regex, regex::Error> {
     Regex::new(
         r"^(?P<qty>[\d.]+,\d{3})\s+(?P<unit>\S+)\s+(?P<ep>[\d.]+,\d{2})\s*€(?:\s+(?P<gb>[\d.]+,\d{2})\s*€|\s+Nur\s+Einh\.-Pr\.)?\s*$",
@@ -295,6 +361,7 @@ fn find_short_three_part_position_oz(text: &str) -> Result<HashSet<String>> {
     let candidate_re = Regex::new(r"^\s*(?P<oz>\d{1,3}\.\d{1,3}\.\d{1,3})(?P<rest>\s+\S.*)$")?;
     let next_oz_re = Regex::new(r"^\d+(?:\.\d+){1,5}\.?\s+\S")?;
     let quantity_re = bare_quantity_regex()?;
+    let inline_price_only_re = inline_price_only_quantity_regex()?;
     let lines = text.lines().map(normalize_line).collect::<Vec<_>>();
     let mut positions = HashSet::new();
 
@@ -306,10 +373,11 @@ fn find_short_three_part_position_oz(text: &str) -> Result<HashSet<String>> {
         if is_date_like_oz(&oz.split('.').collect::<Vec<_>>()) {
             continue;
         }
-        let has_quantity = lines[index + 1..]
-            .iter()
-            .take_while(|following| !next_oz_re.is_match(following))
-            .any(|following| quantity_re.is_match(following));
+        let has_quantity = inline_price_only_re.is_match(&captures["rest"])
+            || lines[index + 1..]
+                .iter()
+                .take_while(|following| !next_oz_re.is_match(following))
+                .any(|following| quantity_re.is_match(following));
         if has_quantity {
             positions.insert(oz);
         }
@@ -320,7 +388,13 @@ fn find_short_three_part_position_oz(text: &str) -> Result<HashSet<String>> {
 
 fn bare_quantity_regex() -> Result<Regex, regex::Error> {
     Regex::new(
-        r"(?i)^(?P<qty>\d[\d.]*(?:,\d{1,3})?)\s+(?P<unit>m²|m2|m³|m3|m|cm|mm|km|Stück|Stck|Stk|St|Pauschal|psch|kg|t|l|lfm|qm|Std|h)(?:\s|$)",
+        r"(?i)^(?P<qty>\d[\d.]*(?:,\d{1,3})?)\s*(?P<unit>m²|m2|m³|m3|mm|cm|km|m|Stück|Stck|Stk|St|Pauschal|psch|kg|lfm|qm|Std|t|l|h)(?:\s+(?P<price_only>ohne\s+GP))?(?:\s|$)",
+    )
+}
+
+fn inline_price_only_quantity_regex() -> Result<Regex, regex::Error> {
+    Regex::new(
+        r"(?i)(?P<qty>\d[\d.]*(?:,\d{1,3})?)\s*(?P<unit>m²|m2|m³|m3|mm|cm|km|m|Stück|Stck|Stk|St|Pauschal|psch|kg|lfm|qm|Std|t|l|h)\s+(?P<price_only>ohne\s+GP)\s*$",
     )
 }
 
@@ -413,7 +487,12 @@ fn is_date_like_oz(components: &[&str]) -> bool {
     })
 }
 
-fn is_heading_oz(caps: &regex::Captures<'_>, position_active: bool) -> bool {
+fn is_heading_oz(
+    caps: &regex::Captures<'_>,
+    position_active: bool,
+    in_lv_table: bool,
+    current_has_quantity: bool,
+) -> bool {
     let components = caps["oz"].split('.').collect::<Vec<_>>();
     if caps.name("trailing").is_some() {
         components.iter().all(|component| component.len() <= 2)
@@ -421,10 +500,45 @@ fn is_heading_oz(caps: &regex::Captures<'_>, position_active: bool) -> bool {
     } else {
         if components.len() == 1 {
             !position_active
+                || (in_lv_table
+                    && current_has_quantity
+                    && components[0].len() <= 2
+                    && !heading_title_is_quantity_unit(&caps["title"]))
         } else {
-            components.len() <= 3 && components.iter().all(|component| component.len() == 2)
+            components.len() <= 3 && components.iter().all(|component| component.len() <= 2)
         }
     }
+}
+
+fn heading_title_is_quantity_unit(title: &str) -> bool {
+    let first = title
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase();
+    matches!(
+        first.as_str(),
+        "m²" | "m2"
+            | "m³"
+            | "m3"
+            | "mm"
+            | "cm"
+            | "km"
+            | "m"
+            | "stück"
+            | "stck"
+            | "stk"
+            | "st"
+            | "pauschal"
+            | "psch"
+            | "kg"
+            | "lfm"
+            | "qm"
+            | "std"
+            | "t"
+            | "l"
+            | "h"
+    )
 }
 
 fn apply_price_captures(position: &mut Position, caps: &regex::Captures<'_>, source: &str) {
@@ -482,6 +596,23 @@ fn extract_trailing_quantity(position: &mut Position, lines: &mut Vec<String>) {
         return;
     }
 
+    let Ok(inline_price_only_re) = inline_price_only_quantity_regex() else {
+        return;
+    };
+    if let Some((index, caps)) = lines.iter().enumerate().rev().find_map(|(index, line)| {
+        inline_price_only_re
+            .captures(line)
+            .map(|caps| (index, caps))
+    }) {
+        let match_start = caps.get(0).map(|value| value.start()).unwrap_or_default();
+        position.quantity = parse_decimal(caps.name("qty").map(|value| value.as_str()));
+        position.unit = caps.name("unit").map(|value| value.as_str().to_owned());
+        position.provisional = true;
+        position.price_only = true;
+        remove_matched_quantity(lines, index, match_start);
+        return;
+    }
+
     let Ok(bare_re) = bare_quantity_regex() else {
         return;
     };
@@ -496,10 +627,16 @@ fn extract_trailing_quantity(position: &mut Position, lines: &mut Vec<String>) {
     let match_start = caps.get(0).map(|value| value.start()).unwrap_or_default();
     position.quantity = parse_decimal(caps.name("qty").map(|value| value.as_str()));
     position.unit = caps.name("unit").map(|value| value.as_str().to_owned());
+    position.provisional |= caps.name("price_only").is_some();
+    position.price_only |= caps.name("price_only").is_some();
     remove_matched_quantity(lines, index, match_start);
 }
 
 fn remove_matched_quantity(lines: &mut Vec<String>, index: usize, match_start: usize) {
+    // Eine Mengen-/Preiszeile schließt die Position fachlich ab. Alles, was
+    // danach bis zur nächsten erkannten OZ steht, sind in den untersuchten
+    // Drucklisten Seiten-/Summenreste und darf nicht in DetailTxt gelangen.
+    lines.truncate(index + 1);
     let prefix = lines[index]
         .get(..match_start)
         .unwrap_or_default()
@@ -518,7 +655,9 @@ pub fn parse_decimal(value: Option<&str>) -> Option<Decimal> {
 }
 
 fn normalize_line(raw: &str) -> String {
-    raw.replace('\u{00A0}', " ")
+    HTML_BREAK_RE
+        .replace_all(raw, " ")
+        .replace('\u{00A0}', " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -1219,5 +1358,143 @@ Summe 3.8.1. Vorbereitende Arbeiten .........................
         assert_eq!(boq.roots[0].oz, "02");
         assert_eq!(boq.roots[0].children[0].oz, "02.03");
         assert_eq!(boq.roots[0].children[0].children[0].oz, "02.03.04");
+    }
+
+    #[test]
+    fn keeps_empty_area_and_title_from_lv_table() {
+        let text = "1 Allgemeine Vorbemerkungen\n\
+Leistungsverzeichnis\n\
+Menge EP (netto) Gesamt (netto)\n\
+1 Vorbereitende Maßnahmen\n\
+1.1 Vorbereitende Maßnahmen\n\
+2 Fliesenarbeiten\n\
+2.1 Bodenbeläge\n\
+2.1.1 Fliesen verlegen\n\
+10,000 m²\n";
+        let boq = parse_text("fliesen.pdf", text).unwrap();
+
+        assert_eq!(boq.roots.len(), 2);
+        assert_eq!(boq.roots[0].oz, "1");
+        assert_eq!(boq.roots[0].title, "Vorbereitende Maßnahmen");
+        assert_eq!(boq.roots[0].children.len(), 1);
+        assert_eq!(boq.roots[0].children[0].oz, "1.1");
+        assert_eq!(boq.roots[0].children[0].title, "Vorbereitende Maßnahmen");
+        assert!(boq.roots[0].children[0].positions.is_empty());
+        assert_eq!(boq.roots[1].oz, "2");
+    }
+
+    #[test]
+    fn keeps_bidder_make_and_type_request_in_long_text() {
+        let text = "OZ Leistungsbeschreibung Menge EP Gesamt\n\
+01.01.01.001 Fliesen verlegen\n\
+angebotenes Fabrikat/Typ der Ausgleichsmasse:'\n\
+....................................................' vom AN anzugeben\n\
+1,000 m²\n";
+        let boq = parse_text("fliesen.pdf", text).unwrap();
+        let position = first_position(&boq);
+
+        assert!(position
+            .long_text
+            .contains("angebotenes Fabrikat/Typ der Ausgleichsmasse"));
+        assert!(position.long_text.contains("vom AN anzugeben"));
+    }
+
+    #[test]
+    fn parses_compact_price_only_quantity_and_short_three_part_oz() {
+        let text = "Menge EP (netto) Gesamt (netto)\n\
+3 F90 - Gipskartonständerwände\n\
+3.5 Mehrpreise F90\n\
+e Eventualposition (ohne Gesamtpreis)\n\
+3.5.1 Mehrpreis für freies Wandende\n\
+Ausbildung einschließlich Kantenschutzprofilen\n\
+1m ohne GP\n\
+3.6 Mehrpreise Gipskartonwände Als\n\
+Schallschutzwand\n\
+e Eventualposition (ohne Gesamtpreis)\n\
+3.6.1 Mehrpreis für Schallschutzwand\n\
+Beplankung mit Diamantplatten\n\
+1m ohne GP\n";
+        let boq = parse_text("trockenbau.pdf", text).unwrap();
+        let level_three = &boq.roots[0].children;
+
+        assert_eq!(level_three[0].oz, "3.5");
+        assert_eq!(level_three[0].positions[0].oz, "3.5.1");
+        assert!(level_three[0].positions[0].provisional);
+        assert!(level_three[0].positions[0].price_only);
+        assert_eq!(level_three[0].positions[0].unit.as_deref(), Some("m"));
+        assert_eq!(level_three[1].oz, "3.6");
+        assert_eq!(
+            level_three[1].title,
+            "Mehrpreise Gipskartonwände Als Schallschutzwand"
+        );
+        assert_eq!(level_three[1].positions[0].oz, "3.6.1");
+    }
+
+    #[test]
+    fn parses_inline_compact_price_only_quantity() {
+        let text = "Menge EP (netto) Gesamt (netto)\n\
+1 Trockenbau\n\
+1.6 Mehrpreise\n\
+e Eventualposition (ohne Gesamtpreis)\n\
+1.6.3 Mehrpreis für Diamantplatten 2 Fach 1 m² ohne GP\n\
+1.6.4 Nächste Position\n\
+Beschreibung\n\
+1 m²\n";
+        let boq = parse_text("trockenbau.pdf", text).unwrap();
+        let position = &boq.roots[0].children[0].positions[0];
+
+        assert_eq!(position.oz, "1.6.3");
+        assert_eq!(position.short_text, "Mehrpreis für Diamantplatten 2 Fach");
+        assert_eq!(position.quantity, Some(Decimal::ONE));
+        assert_eq!(position.unit.as_deref(), Some("m²"));
+        assert!(position.provisional);
+        assert!(position.price_only);
+    }
+
+    #[test]
+    fn removes_literal_html_break_from_position_text() {
+        let text = "01 Trockenbau\n\
+01.01 Wände\n\
+01.01.001 GK-Wand<br>zweilagig\n\
+Liefern und montieren<br />nach Herstellerangaben.\n\
+1,000 m²\n";
+        let boq = parse_text("trockenbau.pdf", text).unwrap();
+        let position = &boq.roots[0].children[0].positions[0];
+
+        assert_eq!(position.short_text, "GK-Wand zweilagig");
+        assert_eq!(
+            position.long_text,
+            "Liefern und montieren nach Herstellerangaben."
+        );
+        assert!(!position.short_text.contains("<br"));
+        assert!(!position.long_text.contains("<br"));
+    }
+
+    #[test]
+    fn removes_stand_footer_and_text_after_quantity() {
+        let text = "Menge EP (netto) Gesamt (netto)\n\
+1 Trockenbau\n\
+1.6 Mehrpreise\n\
+1.6.2 Oberfläche Q3\n\
+Ausführlicher Leistungstext bleibt erhalten\n\
+1 m²\n\
+Trennwände (1)\n\
+Stand 12.01.2026 Seite 20/27\n\
+2 Brandschutzwände\n\
+2.1 Wände\n\
+2.1.1 Brandschutzwand\n\
+Text\n\
+1 m²\n";
+        let boq = parse_text("trockenbau.pdf", text).unwrap();
+        let position = &boq.roots[0].children[0].positions[0];
+
+        assert_eq!(
+            position.long_text,
+            "Ausführlicher Leistungstext bleibt erhalten"
+        );
+        assert!(!position.long_text.contains("Stand 12.01.2026"));
+        assert!(!position.long_text.contains("Trennwände (1)"));
+        assert_eq!(boq.roots[1].oz, "2");
+        assert_eq!(boq.roots[1].title, "Brandschutzwände");
     }
 }
