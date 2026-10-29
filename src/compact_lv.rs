@@ -15,17 +15,16 @@ pub fn looks_like_compact_lv(text: &str) -> bool {
 pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
     let heading = Regex::new(r"^(\d{1,2})\s+(\S.+)$")?;
     let item = Regex::new(r"^(\d{1,2})\.(\d{1,3})\s+(\S.+)$")?;
-    let quantity = Regex::new(r"^(\d+(?:[.,]\d+)?)\s+(m²|m2|lfdm|St|psch|h)\s+(?:_+|nur\s+EP)")?;
+    let quantity = Regex::new(r"^(\d+(?:[.,]\d+)?)\s*(m²|m2|lfdm|St|psch|h)\s+(?:_+|nur\s+EP)")?;
     let mut boq = BillOfQuantities::new(source);
     let mut current_chapter: Option<usize> = None;
     let mut current_item: Option<Position> = None;
-    let mut current_original = String::new();
-    let mut preamble = Vec::new();
+        let mut preamble = Vec::new();
     let mut started = false;
     let mut numbering: HashMap<usize, usize> = HashMap::new();
     let mut original_to_exported: Vec<(String, String)> = Vec::new();
 
-    for (page_index, page) in text.split('\u{000c}').enumerate() {
+    'pages: for (page_index, page) in text.split('\u{000c}').enumerate() {
         let page_number = page_index + 1;
         for raw in page.lines() {
             let line = raw.trim();
@@ -42,7 +41,7 @@ pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
             if line.starts_with("Bauvorhaben:") && boq.project.is_empty() {
                 boq.project = line.trim_start_matches("Bauvorhaben:").trim().to_owned();
             }
-            if !raw.starts_with(char::is_whitespace) {
+            if raw.chars().next().is_some_and(|c| !c.is_whitespace()) {
             if let Some(caps) = heading.captures(line) {
                 let chapter_num: usize = caps[1].parse()?;
                 if (1..=99).contains(&chapter_num) && (current_chapter.is_none() || chapter_num > boq.roots.last().and_then(|n| n.oz.parse::<usize>().ok()).unwrap_or(0)) {
@@ -71,8 +70,7 @@ pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
                         let original = format!("{}.{}", &caps[1], &caps[2]);
                         let exported = format!("{chapter:02}.{:03}", sequence);
                         original_to_exported.push((original.clone(), exported.clone()));
-                        current_original = original;
-                        current_item = Some(Position {
+                                                current_item = Some(Position {
                             oz: exported,
                             short_text: caps[3].to_owned(),
                             page_from: Some(page_number),
@@ -143,6 +141,6 @@ mod tests {
         assert_eq!(boq.roots[0].positions[0].oz, "01.001");
         assert_eq!(boq.roots[0].positions[1].oz, "01.002");
         assert_eq!(boq.roots[0].positions[0].unit.as_deref(), Some("m²"));
-        assert!(boq.warnings.iter().any(|w| w.contains("doppelter")));
+        assert!(boq.warnings.iter().any(|w| w.contains("Nummerierung")));
     }
 }
