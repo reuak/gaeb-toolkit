@@ -1,4 +1,9 @@
-use std::{collections::{HashMap, HashSet}, fs, path::Path, process::Command};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+    process::Command,
+};
 
 use anyhow::{Context, Result};
 use quick_xml::escape::unescape;
@@ -52,7 +57,8 @@ pub fn postprocess_pdf(path: &Path, boq: &mut BillOfQuantities) -> Result<()> {
 
 fn remove_reference_positions(nodes: &mut [Node]) {
     for node in nodes {
-        node.positions.retain(|position| !is_reference_position(position));
+        node.positions
+            .retain(|position| !is_reference_position(position));
         remove_reference_positions(&mut node.children);
     }
 }
@@ -124,8 +130,12 @@ fn extract_bold_short_texts(path: &Path) -> Result<HashMap<(String, usize), Stri
         );
     }
 
-    let layout = fs::read_to_string(&xml_path)
-        .with_context(|| format!("PDF-Layout konnte nicht gelesen werden: {}", xml_path.display()))?;
+    let layout = fs::read_to_string(&xml_path).with_context(|| {
+        format!(
+            "PDF-Layout konnte nicht gelesen werden: {}",
+            xml_path.display()
+        )
+    })?;
     parse_bold_short_texts(&layout)
 }
 
@@ -139,8 +149,13 @@ fn parse_bold_short_texts(layout: &str) -> Result<HashMap<(String, usize), Strin
 
     let mut bold_fonts = HashSet::new();
     for caps in font_re.captures_iter(layout) {
-        let attrs = caps.name("attrs").map(|value| value.as_str()).unwrap_or_default();
-        let Some(id) = attr(attrs, "id") else { continue };
+        let attrs = caps
+            .name("attrs")
+            .map(|value| value.as_str())
+            .unwrap_or_default();
+        let Some(id) = attr(attrs, "id") else {
+            continue;
+        };
         let family = attr(attrs, "family").unwrap_or_default().to_lowercase();
         if ["bold", "semibold", "demi", "black", "heavy"]
             .iter()
@@ -152,19 +167,35 @@ fn parse_bold_short_texts(layout: &str) -> Result<HashMap<(String, usize), Strin
 
     let mut result = HashMap::new();
     for page_caps in page_re.captures_iter(layout) {
-        let attrs = page_caps.name("attrs").map(|value| value.as_str()).unwrap_or_default();
+        let attrs = page_caps
+            .name("attrs")
+            .map(|value| value.as_str())
+            .unwrap_or_default();
         let Some(page) = attr(attrs, "number").and_then(|value| value.parse::<usize>().ok()) else {
             continue;
         };
-        let body = page_caps.name("body").map(|value| value.as_str()).unwrap_or_default();
+        let body = page_caps
+            .name("body")
+            .map(|value| value.as_str())
+            .unwrap_or_default();
         let mut fragments = Vec::new();
 
         for caps in text_re.captures_iter(body) {
-            let attrs = caps.name("attrs").map(|value| value.as_str()).unwrap_or_default();
-            let top = attr(attrs, "top").and_then(|v| v.parse().ok()).unwrap_or_default();
-            let left = attr(attrs, "left").and_then(|v| v.parse().ok()).unwrap_or_default();
+            let attrs = caps
+                .name("attrs")
+                .map(|value| value.as_str())
+                .unwrap_or_default();
+            let top = attr(attrs, "top")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_default();
+            let left = attr(attrs, "left")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_default();
             let font = attr(attrs, "font").unwrap_or_default();
-            let raw = caps.name("body").map(|value| value.as_str()).unwrap_or_default();
+            let raw = caps
+                .name("body")
+                .map(|value| value.as_str())
+                .unwrap_or_default();
             let stripped = tag_re.replace_all(raw, "");
             let text = unescape(&stripped.replace("&nbsp;", " "))
                 .map(|value| normalize(&value))
@@ -181,7 +212,9 @@ fn parse_bold_short_texts(layout: &str) -> Result<HashMap<(String, usize), Strin
 
         let lines = group_lines(fragments);
         for (index, line) in lines.iter().enumerate() {
-            let Some(caps) = position_re.captures(&line.text) else { continue };
+            let Some(caps) = position_re.captures(&line.text) else {
+                continue;
+            };
             let oz = caps.name("oz").unwrap().as_str().to_owned();
             let rest = caps.name("rest").map(|v| v.as_str()).unwrap_or_default();
             if is_reference_text(rest) {
@@ -234,7 +267,10 @@ fn group_lines(mut fragments: Vec<TextFragment>) -> Vec<LayoutLine> {
     fragments.sort_by_key(|fragment| (fragment.top, fragment.left));
     let mut lines: Vec<LayoutLine> = Vec::new();
     for fragment in fragments {
-        if let Some(line) = lines.last_mut().filter(|line| (line.top - fragment.top).abs() <= 2) {
+        if let Some(line) = lines
+            .last_mut()
+            .filter(|line| (line.top - fragment.top).abs() <= 2)
+        {
             if !line.text.is_empty() {
                 line.text.push(' ');
             }
@@ -279,10 +315,7 @@ fn is_layout_noise(value: &str) -> bool {
     ) || value.starts_with("OZ Menge / Einheit")
 }
 
-fn apply_bold_short_texts(
-    nodes: &mut [Node],
-    short_texts: &HashMap<(String, usize), String>,
-) {
+fn apply_bold_short_texts(nodes: &mut [Node], short_texts: &HashMap<(String, usize), String>) {
     for node in nodes {
         for position in &mut node.positions {
             let page = position.page_from.unwrap_or_default();
@@ -301,7 +334,11 @@ fn remove_short_continuation_from_long_text(position: &mut Position, short: &str
     if continuation.is_empty() {
         return;
     }
-    let mut long_lines = position.long_text.lines().map(str::to_owned).collect::<Vec<_>>();
+    let mut long_lines = position
+        .long_text
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let mut removed = 0usize;
     while removed < continuation.len()
         && removed < long_lines.len()
@@ -343,8 +380,16 @@ mod tests {
     fn ignores_reference_positions() {
         let mut nodes = vec![Node {
             positions: vec![
-                Position { oz: "01.01.01.010".into(), short_text: "Leistung".into(), ..Position::default() },
-                Position { oz: "01.01.01.010".into(), short_text: "Zulage zu Position 01.01.01.010".into(), ..Position::default() },
+                Position {
+                    oz: "01.01.01.010".into(),
+                    short_text: "Leistung".into(),
+                    ..Position::default()
+                },
+                Position {
+                    oz: "01.01.01.010".into(),
+                    short_text: "Zulage zu Position 01.01.01.010".into(),
+                    ..Position::default()
+                },
             ],
             ..Node::default()
         }];

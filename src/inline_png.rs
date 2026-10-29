@@ -56,8 +56,12 @@ pub fn inject_pdf_pngs(
     let xml = fs::read_to_string(x83_path)
         .with_context(|| format!("X83 konnte nicht gelesen werden: {}", x83_path.display()))?;
     let (updated, embedded) = inject_images_into_items(&xml, &images, &positions)?;
-    fs::write(x83_path, updated)
-        .with_context(|| format!("X83 konnte nicht geschrieben werden: {}", x83_path.display()))?;
+    fs::write(x83_path, updated).with_context(|| {
+        format!(
+            "X83 konnte nicht geschrieben werden: {}",
+            x83_path.display()
+        )
+    })?;
     Ok(embedded)
 }
 
@@ -120,9 +124,7 @@ fn best_position_index(image: &InlinePng, positions: &[PositionRef]) -> Option<u
     positions
         .iter()
         .enumerate()
-        .filter(|(_, position)| {
-            position.page_from <= image.page && image.page <= position.page_to
-        })
+        .filter(|(_, position)| position.page_from <= image.page && image.page <= position.page_to)
         .min_by_key(|(index, position)| {
             let span = position.page_to - position.page_from;
             (span, usize::MAX - position.page_from, *index)
@@ -155,8 +157,12 @@ fn extract_positioned_pngs(pdf_path: &Path) -> Result<Vec<InlinePng>> {
         );
     }
 
-    let layout = fs::read_to_string(&xml_path)
-        .with_context(|| format!("PDF-Layout konnte nicht gelesen werden: {}", xml_path.display()))?;
+    let layout = fs::read_to_string(&xml_path).with_context(|| {
+        format!(
+            "PDF-Layout konnte nicht gelesen werden: {}",
+            xml_path.display()
+        )
+    })?;
     parse_layout_images(&layout, dir.path())
 }
 
@@ -170,19 +176,31 @@ fn parse_layout_images(layout: &str, base_dir: &Path) -> Result<Vec<InlinePng>> 
     let mut active_oz_from_previous_page: Option<String> = None;
 
     for page_caps in page_re.captures_iter(layout) {
-        let attrs = page_caps.name("attrs").map(|value| value.as_str()).unwrap_or("");
-        let body = page_caps.name("body").map(|value| value.as_str()).unwrap_or("");
+        let attrs = page_caps
+            .name("attrs")
+            .map(|value| value.as_str())
+            .unwrap_or("");
+        let body = page_caps
+            .name("body")
+            .map(|value| value.as_str())
+            .unwrap_or("");
         let Some(page) = attr(attrs, "number").and_then(|value| value.parse::<usize>().ok()) else {
             continue;
         };
 
         let mut markers = Vec::new();
         for text_caps in text_re.captures_iter(body) {
-            let text_attrs = text_caps.name("attrs").map(|value| value.as_str()).unwrap_or("");
+            let text_attrs = text_caps
+                .name("attrs")
+                .map(|value| value.as_str())
+                .unwrap_or("");
             let top = attr(text_attrs, "top")
                 .and_then(|value| value.parse::<i32>().ok())
                 .unwrap_or_default();
-            let raw = text_caps.name("body").map(|value| value.as_str()).unwrap_or("");
+            let raw = text_caps
+                .name("body")
+                .map(|value| value.as_str())
+                .unwrap_or("");
             let stripped = tag_re.replace_all(raw, "");
             let decoded = unescape(&stripped.replace("&nbsp;", " "))
                 .map(|value| value.into_owned())
@@ -197,7 +215,10 @@ fn parse_layout_images(layout: &str, base_dir: &Path) -> Result<Vec<InlinePng>> 
         markers.sort_by_key(|marker| marker.top);
 
         for image_caps in image_re.captures_iter(body) {
-            let image_attrs = image_caps.name("attrs").map(|value| value.as_str()).unwrap_or("");
+            let image_attrs = image_caps
+                .name("attrs")
+                .map(|value| value.as_str())
+                .unwrap_or("");
             let top = attr(image_attrs, "top")
                 .and_then(|value| value.parse::<i32>().ok())
                 .unwrap_or_default();
@@ -216,11 +237,19 @@ fn parse_layout_images(layout: &str, base_dir: &Path) -> Result<Vec<InlinePng>> 
             }
 
             let reader = ImageReader::open(&source_path)
-                .with_context(|| format!("Bild konnte nicht geöffnet werden: {}", source_path.display()))?
+                .with_context(|| {
+                    format!(
+                        "Bild konnte nicht geöffnet werden: {}",
+                        source_path.display()
+                    )
+                })?
                 .with_guessed_format()?;
-            let decoded = reader
-                .decode()
-                .with_context(|| format!("Bild konnte nicht dekodiert werden: {}", source_path.display()))?;
+            let decoded = reader.decode().with_context(|| {
+                format!(
+                    "Bild konnte nicht dekodiert werden: {}",
+                    source_path.display()
+                )
+            })?;
             if decoded.width() < 32
                 || decoded.height() < 32
                 || display_width < 24

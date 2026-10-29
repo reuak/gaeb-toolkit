@@ -1,9 +1,9 @@
 //! Parser for compact, unpriced LVs with "1.1 Beschreibung" followed by "65 m² ____ ____".
-use std::{collections::HashMap, str::FromStr};
+use crate::model::{BillOfQuantities, Node, Position};
 use anyhow::Result;
 use regex::Regex;
 use rust_decimal::Decimal;
-use crate::model::{BillOfQuantities, Node, Position};
+use std::{collections::HashMap, str::FromStr};
 
 /// Only activates for the recognizable compact layout. Other PDFs retain the existing parser.
 pub fn looks_like_compact_lv(text: &str) -> bool {
@@ -19,7 +19,7 @@ pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
     let mut boq = BillOfQuantities::new(source);
     let mut current_chapter: Option<usize> = None;
     let mut current_item: Option<Position> = None;
-        let mut preamble = Vec::new();
+    let mut preamble = Vec::new();
     let mut started = false;
     let mut numbering: HashMap<usize, usize> = HashMap::new();
     let mut original_to_exported: Vec<(String, String)> = Vec::new();
@@ -28,37 +28,49 @@ pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
         let page_number = page_index + 1;
         for raw in page.lines() {
             let line = raw.trim();
-            if line == "Zusammenstellung" { break 'pages; }
-            if line.is_empty() || line.starts_with("Leistungsverzeichnis -")
+            if line == "Zusammenstellung" {
+                break 'pages;
+            }
+            if line.is_empty()
+                || line.starts_with("Leistungsverzeichnis -")
                 || line.starts_with("Bolat Natursteine GmbH")
                 || line.starts_with("Dammstraße ")
                 || line.starts_with("Tel. ")
                 || line.starts_with("Pos. / Leistungsbeschreibung")
                 || line == "Zusammenstellung"
-                || line.starts_with("Gesamtsumme netto") {
+                || line.starts_with("Gesamtsumme netto")
+            {
                 continue;
             }
             if line.starts_with("Bauvorhaben:") && boq.project.is_empty() {
                 boq.project = line.trim_start_matches("Bauvorhaben:").trim().to_owned();
             }
             if raw.chars().next().is_some_and(|c| !c.is_whitespace()) {
-            if let Some(caps) = heading.captures(line) {
-                let chapter_num: usize = caps[1].parse()?;
-                if (1..=99).contains(&chapter_num) && (current_chapter.is_none() || chapter_num > boq.roots.last().and_then(|n| n.oz.parse::<usize>().ok()).unwrap_or(0)) {
-                    flush_item(&mut boq, current_chapter, &mut current_item);
-                    started = true;
-                    let chapter = Node {
-                        oz: format!("{chapter_num:02}"),
-                        title: caps[2].to_owned(),
-                        level: 1,
-                        page: Some(page_number),
-                        ..Node::default()
-                    };
-                    boq.roots.push(chapter);
-                    current_chapter = Some(boq.roots.len() - 1);
-                    continue;
+                if let Some(caps) = heading.captures(line) {
+                    let chapter_num: usize = caps[1].parse()?;
+                    if (1..=99).contains(&chapter_num)
+                        && (current_chapter.is_none()
+                            || chapter_num
+                                > boq
+                                    .roots
+                                    .last()
+                                    .and_then(|n| n.oz.parse::<usize>().ok())
+                                    .unwrap_or(0))
+                    {
+                        flush_item(&mut boq, current_chapter, &mut current_item);
+                        started = true;
+                        let chapter = Node {
+                            oz: format!("{chapter_num:02}"),
+                            title: caps[2].to_owned(),
+                            level: 1,
+                            page: Some(page_number),
+                            ..Node::default()
+                        };
+                        boq.roots.push(chapter);
+                        current_chapter = Some(boq.roots.len() - 1);
+                        continue;
+                    }
                 }
-            }
             }
             if let Some(caps) = item.captures(line) {
                 let chapter: usize = caps[1].parse()?;
@@ -70,7 +82,7 @@ pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
                         let original = format!("{}.{}", &caps[1], &caps[2]);
                         let exported = format!("{chapter:02}.{:03}", sequence);
                         original_to_exported.push((original.clone(), exported.clone()));
-                                                current_item = Some(Position {
+                        current_item = Some(Position {
                             oz: exported,
                             short_text: caps[3].to_owned(),
                             page_from: Some(page_number),
@@ -93,7 +105,9 @@ pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
                 }
                 // Do not pollute item descriptions with page headers or totals.
                 if !line.starts_with("Seite ") && !line.contains("________________ EUR") {
-                    if !pos.long_text.is_empty() { pos.long_text.push('\n'); }
+                    if !pos.long_text.is_empty() {
+                        pos.long_text.push('\n');
+                    }
                     pos.long_text.push_str(line);
                 }
             } else if !started {
@@ -105,8 +119,14 @@ pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
     boq.preamble = preamble.join("\n");
     // Original item numbers are retained in the descriptive text wherever remapping was needed.
     for (original, exported) in original_to_exported {
-        let expected = original.split('.').next_back().and_then(|v| v.parse::<usize>().ok());
-        let actual = exported.split('.').next_back().and_then(|v| v.parse::<usize>().ok());
+        let expected = original
+            .split('.')
+            .next_back()
+            .and_then(|v| v.parse::<usize>().ok());
+        let actual = exported
+            .split('.')
+            .next_back()
+            .and_then(|v| v.parse::<usize>().ok());
         if expected != actual {
             boq.warnings.push(format!("OZ {original} wird wegen doppelter/verschobener Nummerierung als {exported} exportiert."));
             for root in &mut boq.roots {

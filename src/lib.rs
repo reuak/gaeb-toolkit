@@ -2,10 +2,12 @@ use std::{collections::HashSet, path::Path, process::Command};
 
 use anyhow::{bail, Context};
 
-pub mod export;
 pub mod compact_lv;
+pub mod export;
 pub mod inline_png;
 pub mod model;
+#[path = "parser_v2.rs"]
+pub mod parser;
 pub mod pdf_cleanup;
 pub mod placeholder_oz;
 pub mod price_cleanup;
@@ -14,8 +16,6 @@ pub mod provisional_validation;
 pub mod provisional_xml;
 pub mod reference_cleanup;
 pub mod title_cleanup;
-#[path = "parser_v2.rs"]
-pub mod parser;
 pub mod x83;
 
 pub use inline_png::inject_pdf_pngs;

@@ -247,16 +247,16 @@ fn finish_position(
         .collect::<Vec<_>>();
     if let Some(first) = cleaned.first() {
         position.short_text = first.clone();
-        position.long_text = cleaned.iter().skip(1).cloned().collect::<Vec<_>>().join("\n");
+        position.long_text = cleaned
+            .iter()
+            .skip(1)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
     }
     lines.clear();
 
-    let hierarchy_oz = position
-        .oz
-        .split('.')
-        .take(3)
-        .collect::<Vec<_>>()
-        .join(".");
+    let hierarchy_oz = position.oz.split('.').take(3).collect::<Vec<_>>().join(".");
     let parent = ensure_hierarchy_from_position(
         &mut boq.roots,
         &hierarchy_oz,
@@ -352,7 +352,10 @@ fn validate_node(
             warnings.push(format!("Doppelte OZ: {}", position.oz));
         }
         let omitted = position.short_text == "Position entfällt"
-            || position.long_text.lines().any(|line| line == "Position entfällt");
+            || position
+                .long_text
+                .lines()
+                .any(|line| line == "Position entfällt");
         if !omitted && (position.quantity.is_none() || position.unit_price.is_none()) {
             warnings.push(format!("Unvollständige Preiszeile: {}", position.oz));
         }
@@ -380,8 +383,14 @@ mod tests {
 
     #[test]
     fn parses_german_decimal() {
-        assert_eq!(parse_decimal(Some("1.263,50")), Some(Decimal::new(126350, 2)));
-        assert_eq!(parse_decimal(Some("361,000")), Some(Decimal::new(361000, 3)));
+        assert_eq!(
+            parse_decimal(Some("1.263,50")),
+            Some(Decimal::new(126350, 2))
+        );
+        assert_eq!(
+            parse_decimal(Some("361,000")),
+            Some(Decimal::new(361000, 3))
+        );
     }
 
     #[test]
@@ -400,11 +409,15 @@ mod tests {
 
     #[test]
     fn detects_position_without_prices() {
-        let text = "01.01.01.120 Verkehrsrechtl. Beantragung Baustelleneinrichtung\nPosition entfällt\n";
+        let text =
+            "01.01.01.120 Verkehrsrechtl. Beantragung Baustelleneinrichtung\nPosition entfällt\n";
         let boq = parse_text("test.txt", text).unwrap();
         let position = first_position(&boq);
         assert_eq!(position.oz, "01.01.01.120");
-        assert_eq!(position.short_text, "Verkehrsrechtl. Beantragung Baustelleneinrichtung");
+        assert_eq!(
+            position.short_text,
+            "Verkehrsrechtl. Beantragung Baustelleneinrichtung"
+        );
         assert_eq!(position.long_text, "Position entfällt");
         assert!(boq.warnings.is_empty());
     }

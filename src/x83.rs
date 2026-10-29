@@ -92,7 +92,13 @@ fn collect_conflicts(nodes: &[Node], seen: &mut HashSet<String>, conflicts: &mut
             if position.quantity.is_none() {
                 conflicts.push(format!("Menge fehlt: {}", position.oz));
             }
-            if position.unit.as_deref().unwrap_or_default().trim().is_empty() {
+            if position
+                .unit
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
                 conflicts.push(format!("Einheit fehlt: {}", position.oz));
             }
             if position.short_text.trim().is_empty() && position.long_text.trim().is_empty() {
@@ -214,7 +220,11 @@ fn write_item<W: std::io::Write>(
     if let Some(quantity) = position.quantity {
         write_text(writer, "Qty", &quantity.normalize().to_string())?;
     }
-    if let Some(unit) = position.unit.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(unit) = position
+        .unit
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         write_text(writer, "QU", unit)?;
     }
 
@@ -249,7 +259,11 @@ fn write_add_text<W: std::io::Write>(writer: &mut Writer<W>, value: &str) -> Res
     Ok(())
 }
 
-fn write_rich_text<W: std::io::Write>(writer: &mut Writer<W>, name: &str, value: &str) -> Result<()> {
+fn write_rich_text<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    name: &str,
+    value: &str,
+) -> Result<()> {
     writer.write_event(Event::Start(BytesStart::new(name)))?;
     writer.write_event(Event::Start(BytesStart::new("p")))?;
     write_text(writer, "span", value)?;
@@ -258,9 +272,16 @@ fn write_rich_text<W: std::io::Write>(writer: &mut Writer<W>, name: &str, value:
     Ok(())
 }
 
-fn write_text_block<W: std::io::Write>(writer: &mut Writer<W>, name: &str, value: &str) -> Result<()> {
+fn write_text_block<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    name: &str,
+    value: &str,
+) -> Result<()> {
     writer.write_event(Event::Start(BytesStart::new(name)))?;
-    let lines = value.lines().filter(|line| !line.trim().is_empty()).collect::<Vec<_>>();
+    let lines = value
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
     if lines.is_empty() {
         writer.write_event(Event::Start(BytesStart::new("p")))?;
         write_text(writer, "span", "")?;
@@ -284,11 +305,19 @@ fn write_text<W: std::io::Write>(writer: &mut Writer<W>, name: &str, value: &str
 }
 
 fn project_number(boq: &BillOfQuantities) -> &str {
-    if boq.project.trim().is_empty() { "01" } else { &boq.project }
+    if boq.project.trim().is_empty() {
+        "01"
+    } else {
+        &boq.project
+    }
 }
 
 fn project_label(boq: &BillOfQuantities) -> &str {
-    if boq.project.trim().is_empty() { &boq.source } else { &boq.project }
+    if boq.project.trim().is_empty() {
+        &boq.source
+    } else {
+        &boq.project
+    }
 }
 
 fn currency_label(currency: &str) -> &str {

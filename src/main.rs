@@ -12,7 +12,11 @@ use gaeb_toolkit::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "gaeb-toolkit", version, about = "LV-PDFs strukturiert auslesen")]
+#[command(
+    name = "gaeb-toolkit",
+    version,
+    about = "LV-PDFs strukturiert auslesen"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -67,7 +71,9 @@ fn main() -> Result<()> {
             }
             if let Some(path) = x83 {
                 write_x83(&boq, &path, allow_conflicts)?;
-                if !dolibarr { embed_images(&input, &path, &boq, "X83")?; }
+                if !dolibarr {
+                    embed_images(&input, &path, &boq, "X83")?;
+                }
                 apply_provisional(&path, &boq, "X83")?;
             }
 
@@ -77,19 +83,25 @@ fn main() -> Result<()> {
                     // nur einmal extrahiert; danach werden Namespace und DP für die
                     // zusätzliche X83 angepasst. Das spart einen pdftohtml-Lauf.
                     write_x84(&boq, &x84_path, allow_conflicts)?;
-                    if !dolibarr { embed_images(&input, &x84_path, &boq, "X84")?; }
+                    if !dolibarr {
+                        embed_images(&input, &x84_path, &boq, "X84")?;
+                    }
                     apply_provisional(&x84_path, &boq, "X84")?;
                     derive_priced_x83(&x84_path, &x83_path)?;
                     eprintln!("X83 mit Preisen aus der X84 abgeleitet.");
                 }
                 (Some(path), None) => {
                     write_x84(&boq, &path, allow_conflicts)?;
-                    if !dolibarr { embed_images(&input, &path, &boq, "X84")?; }
+                    if !dolibarr {
+                        embed_images(&input, &path, &boq, "X84")?;
+                    }
                     apply_provisional(&path, &boq, "X84")?;
                 }
                 (None, Some(path)) => {
                     write_x83_priced(&boq, &path, allow_conflicts)?;
-                    if !dolibarr { embed_images(&input, &path, &boq, "X83 mit Preisen")?; }
+                    if !dolibarr {
+                        embed_images(&input, &path, &boq, "X83 mit Preisen")?;
+                    }
                     apply_provisional(&path, &boq, "X83 mit Preisen")?;
                 }
                 (None, None) => {}
@@ -98,7 +110,10 @@ fn main() -> Result<()> {
             if boq.warnings.is_empty() {
                 eprintln!("Parsing abgeschlossen.");
             } else {
-                eprintln!("Parsing abgeschlossen mit {} Warnungen.", boq.warnings.len());
+                eprintln!(
+                    "Parsing abgeschlossen mit {} Warnungen.",
+                    boq.warnings.len()
+                );
                 for warning in &boq.warnings {
                     eprintln!("- {warning}");
                 }
@@ -142,7 +157,11 @@ fn derive_priced_x83(x84_path: &Path, x83_path: &Path) -> Result<()> {
             "http://www.gaeb.de/GAEB_DA_XML/DA83/3.3",
         )
         .replace("<DP>84</DP>", "<DP>83</DP>");
-    fs::write(x83_path, converted)
-        .with_context(|| format!("X83 mit Preisen konnte nicht geschrieben werden: {}", x83_path.display()))?;
+    fs::write(x83_path, converted).with_context(|| {
+        format!(
+            "X83 mit Preisen konnte nicht geschrieben werden: {}",
+            x83_path.display()
+        )
+    })?;
     Ok(())
 }
