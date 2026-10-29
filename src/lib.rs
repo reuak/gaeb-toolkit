@@ -6,6 +6,7 @@ pub const CONVERTER_BRANDING: &str = "Umgewandelt mit GAEB.hawkvision.de";
 pub const CONVERTER_NAME: &str = "GAEB.hawkvision.de";
 
 mod breakdown;
+pub mod compact_lv;
 pub mod export;
 pub mod gaeb2000;
 pub mod gaeb2000_export;
@@ -80,7 +81,11 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
         .and_then(|value| value.to_str())
         .unwrap_or("input.pdf");
 
-    let mut boq = parser::parse_text(source, &text)?;
+    let mut boq = if compact_lv::looks_like_compact_lv(&text) {
+        compact_lv::parse_compact_lv(source, &text)?
+    } else {
+        parser::parse_text(source, &text)?
+    };
     if ocr_used {
         boq.warnings.push(
             "OCR-Vorprüfung verwendet: Das PDF enthielt keine ausreichende Textebene.".to_owned(),
