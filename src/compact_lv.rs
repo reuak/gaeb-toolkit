@@ -105,8 +105,8 @@ pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
     boq.preamble = preamble.join("\n");
     // Original item numbers are retained in the descriptive text wherever remapping was needed.
     for (original, exported) in original_to_exported {
-        let expected = original.split('.').last().and_then(|v| v.parse::<usize>().ok());
-        let actual = exported.split('.').last().and_then(|v| v.parse::<usize>().ok());
+        let expected = original.split('.').next_back().and_then(|v| v.parse::<usize>().ok());
+        let actual = exported.split('.').next_back().and_then(|v| v.parse::<usize>().ok());
         if expected != actual {
             boq.warnings.push(format!("OZ {original} wird wegen doppelter/verschobener Nummerierung als {exported} exportiert."));
             for root in &mut boq.roots {
