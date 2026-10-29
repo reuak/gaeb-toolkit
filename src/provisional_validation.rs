@@ -35,17 +35,13 @@ pub fn validate_provisional_totals(layout_text: &str, boq: &mut BillOfQuantities
 
 fn extract_layout_facts(
     text: &str,
-) -> (
-    HashMap<String, LayoutPriceFact>,
-    HashMap<String, Decimal>,
-) {
-    let position_re = Regex::new(r"^(?P<oz>\d{2}\.\d{2}\.\d{2}\.\d{3})(?:\s|$)")
-        .expect("valid position regex");
-    let price_re = Regex::new(r"[\d.]+,\d{3}\s+\S+\s+[\d.]+,\d{2}\s*€")
-        .expect("valid price row regex");
+) -> (HashMap<String, LayoutPriceFact>, HashMap<String, Decimal>) {
+    let position_re =
+        Regex::new(r"^(?P<oz>\d{2}\.\d{2}\.\d{2}\.\d{3})(?:\s|$)").expect("valid position regex");
+    let price_re =
+        Regex::new(r"[\d.]+,\d{3}\s+\S+\s+[\d.]+,\d{2}\s*€").expect("valid price row regex");
     let money_re = Regex::new(r"[\d.]+,\d{2}\s*(?:€|EUR)").expect("valid money regex");
-    let sum_re = Regex::new(r"^Summe\s+(?P<oz>\d{2}(?:\.\d{2}){1,2})\b")
-        .expect("valid sum regex");
+    let sum_re = Regex::new(r"^Summe\s+(?P<oz>\d{2}(?:\.\d{2}){1,2})\b").expect("valid sum regex");
 
     let mut facts = HashMap::<String, LayoutPriceFact>::new();
     let mut totals = HashMap::<String, Decimal>::new();
@@ -116,12 +112,7 @@ fn validate_nodes(
         if node.level == 3 {
             validate_subtitle(node, layout_facts, subtitle_totals, warnings);
         }
-        validate_nodes(
-            &mut node.children,
-            layout_facts,
-            subtitle_totals,
-            warnings,
-        );
+        validate_nodes(&mut node.children, layout_facts, subtitle_totals, warnings);
     }
 }
 
@@ -240,13 +231,10 @@ fn matching_subset(
                 }
             }
             if close(money(sum), required)
-                && best
-                    .as_ref()
-                    .is_none_or(|(best_score, best_selected)| {
-                        layout_score > *best_score
-                            || (layout_score == *best_score
-                                && selected.len() < best_selected.len())
-                    })
+                && best.as_ref().is_none_or(|(best_score, best_selected)| {
+                    layout_score > *best_score
+                        || (layout_score == *best_score && selected.len() < best_selected.len())
+                })
             {
                 best = Some((layout_score, selected));
             }
@@ -274,12 +262,7 @@ fn expected_total(position: &Position) -> Option<Decimal> {
 
 fn last_money(value: &str, money_re: &Regex) -> Option<Decimal> {
     let matched = money_re.find_iter(value).last()?.as_str();
-    parse_decimal(
-        matched
-            .trim_end_matches("EUR")
-            .trim_end_matches('€')
-            .trim(),
-    )
+    parse_decimal(matched.trim_end_matches("EUR").trim_end_matches('€').trim())
 }
 
 fn parse_decimal(value: &str) -> Option<Decimal> {
@@ -344,7 +327,10 @@ mod tests {
         boq.roots.push(Node {
             oz: "01.01.01".into(),
             level: 3,
-            positions: vec![priced("01.01.01.100", 1000), provisional("01.01.01.110", 2, 500)],
+            positions: vec![
+                priced("01.01.01.100", 1000),
+                provisional("01.01.01.110", 2, 500),
+            ],
             ..Node::default()
         });
 
@@ -360,7 +346,10 @@ mod tests {
         boq.roots.push(Node {
             oz: "01.01.01".into(),
             level: 3,
-            positions: vec![priced("01.01.01.100", 1000), provisional("01.01.01.110", 2, 500)],
+            positions: vec![
+                priced("01.01.01.100", 1000),
+                provisional("01.01.01.110", 2, 500),
+            ],
             ..Node::default()
         });
 

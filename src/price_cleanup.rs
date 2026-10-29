@@ -140,11 +140,7 @@ mod tests {
 
     #[test]
     fn swaps_obviously_reversed_prices() {
-        let mut value = position(
-            4,
-            Some(Decimal::new(4000, 2)),
-            Some(Decimal::new(1000, 2)),
-        );
+        let mut value = position(4, Some(Decimal::new(4000, 2)), Some(Decimal::new(1000, 2)));
         repair_position(&mut value, &mut Vec::new());
         assert_eq!(value.unit_price, Some(Decimal::new(1000, 2)));
         assert_eq!(value.total_price, Some(Decimal::new(4000, 2)));
@@ -152,11 +148,7 @@ mod tests {
 
     #[test]
     fn corrects_inconsistent_total_from_unit_price() {
-        let mut value = position(
-            2,
-            Some(Decimal::new(1000, 2)),
-            Some(Decimal::new(2500, 2)),
-        );
+        let mut value = position(2, Some(Decimal::new(1000, 2)), Some(Decimal::new(2500, 2)));
         repair_position(&mut value, &mut Vec::new());
         assert_eq!(value.total_price, Some(Decimal::new(2000, 2)));
     }

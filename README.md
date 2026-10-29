@@ -74,3 +74,17 @@ Der X83-Exporter schreibt GAEB DA XML 3.3, Datenphase 83, Versionsdatum `2021-05
 ## Aktueller Stand
 
 Der Parser ist auf NOVA-ähnliche LV-Ausdrucke ausgerichtet. PDF ist ein Layoutformat; deshalb werden nicht eindeutig erkennbare oder rechnerisch auffällige Positionen als Warnungen ausgegeben.
+
+## Dolibarr-Kompatibilität (experimentell)
+
+Für kompakte unbepreiste Leistungsverzeichnisse mit Spalten `Pos. / Leistungsbeschreibung`, `Menge / Einheit` und Positionszeilen wie `1.1` wird eine eigene Layout-Erkennung eingesetzt. Die reguläre NOVA-Erkennung bleibt für andere PDFs unverändert.
+
+```bash
+cargo run --release -- parse eingabe.pdf --x83 dolibarr.x83 --dolibarr
+```
+
+`--dolibarr` verhindert das Inline-Einbetten von Base64-PNGs. Die Bildinformation wird dadurch **nicht** in der X83 mitgeliefert. Vorbemerkungen werden weiterhin als GAEB-`AddText` geschrieben; das Dolibarr-Modul muss `AddText` importieren können.
+
+Mehrfach vorkommende oder verschobene einfache Positionsnummern (z. B. die zweite `2.6`) werden für eindeutige technische OZ fortlaufend nummeriert. Der Originalwert wird im Langtext vermerkt und in den Parser-Warnungen aufgeführt. Vor der Angebotsbearbeitung die Nummerierung anhand des Original-PDFs prüfen.
+
+**Wichtig:** Dieser Pfad wurde für ein bestimmtes Layout entwickelt. Für produktive Anwendung sind weitere echte PDFs, `cargo test` und ein Dolibarr-Importtest notwendig. Test-PDFs mit Kontaktdaten nicht ins öffentliche Repository übernehmen.
