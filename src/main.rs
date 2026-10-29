@@ -39,6 +39,9 @@ enum Command {
         /// Nur nach manueller Prüfung verwenden.
         #[arg(long)]
         allow_conflicts: bool,
+        /// Dolibarr-kompatibel: PNG-Base64 nicht inline in GAEB einbetten.
+        #[arg(long)]
+        dolibarr: bool,
     },
 }
 
@@ -53,6 +56,7 @@ fn main() -> Result<()> {
             x83_priced,
             x84,
             allow_conflicts,
+            dolibarr,
         } => {
             let boq = parse_pdf(&input)?;
             if let Some(path) = xml {
@@ -63,7 +67,7 @@ fn main() -> Result<()> {
             }
             if let Some(path) = x83 {
                 write_x83(&boq, &path, allow_conflicts)?;
-                embed_images(&input, &path, &boq, "X83")?;
+                if !dolibarr { embed_images(&input, &path, &boq, "X83")?; }
                 apply_provisional(&path, &boq, "X83")?;
             }
 
@@ -73,19 +77,19 @@ fn main() -> Result<()> {
                     // nur einmal extrahiert; danach werden Namespace und DP für die
                     // zusätzliche X83 angepasst. Das spart einen pdftohtml-Lauf.
                     write_x84(&boq, &x84_path, allow_conflicts)?;
-                    embed_images(&input, &x84_path, &boq, "X84")?;
+                    if !dolibarr { embed_images(&input, &x84_path, &boq, "X84")?; }
                     apply_provisional(&x84_path, &boq, "X84")?;
                     derive_priced_x83(&x84_path, &x83_path)?;
                     eprintln!("X83 mit Preisen aus der X84 abgeleitet.");
                 }
                 (Some(path), None) => {
                     write_x84(&boq, &path, allow_conflicts)?;
-                    embed_images(&input, &path, &boq, "X84")?;
+                    if !dolibarr { embed_images(&input, &path, &boq, "X84")?; }
                     apply_provisional(&path, &boq, "X84")?;
                 }
                 (None, Some(path)) => {
                     write_x83_priced(&boq, &path, allow_conflicts)?;
-                    embed_images(&input, &path, &boq, "X83 mit Preisen")?;
+                    if !dolibarr { embed_images(&input, &path, &boq, "X83 mit Preisen")?; }
                     apply_provisional(&path, &boq, "X83 mit Preisen")?;
                 }
                 (None, None) => {}
