@@ -3,6 +3,7 @@ use std::{collections::HashSet, path::Path, process::Command};
 use anyhow::{bail, Context};
 
 pub mod export;
+pub mod compact_lv;
 pub mod inline_png;
 pub mod model;
 pub mod pdf_cleanup;
@@ -47,7 +48,11 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
         .and_then(|value| value.to_str())
         .unwrap_or("input.pdf");
 
-    let mut boq = parser::parse_text(source, &text)?;
+    let mut boq = if compact_lv::looks_like_compact_lv(&text) {
+        compact_lv::parse_compact_lv(source, &text)?
+    } else {
+        parser::parse_text(source, &text)?
+    };
     placeholder_oz::recover_placeholder_positions_from_text(&text, &mut boq)?;
     reference_cleanup::repair_split_references(&mut boq);
     pdf_cleanup::postprocess_pdf(path, &mut boq)?;
