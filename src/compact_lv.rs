@@ -29,6 +29,7 @@ pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
         let page_number = page_index + 1;
         for raw in page.lines() {
             let line = raw.trim();
+            if line == "Zusammenstellung" { break 'pages; }
             if line.is_empty() || line.starts_with("Leistungsverzeichnis -")
                 || line.starts_with("Bolat Natursteine GmbH")
                 || line.starts_with("Dammstraße ")
@@ -41,9 +42,10 @@ pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
             if line.starts_with("Bauvorhaben:") && boq.project.is_empty() {
                 boq.project = line.trim_start_matches("Bauvorhaben:").trim().to_owned();
             }
+            if !raw.starts_with(char::is_whitespace) {
             if let Some(caps) = heading.captures(line) {
                 let chapter_num: usize = caps[1].parse()?;
-                if (1..=99).contains(&chapter_num) && !started || (started && current_item.is_some() && chapter_num <= 9 && line.len() < 100 && !line.contains(" EUR")) {
+                if (1..=99).contains(&chapter_num) && (current_chapter.is_none() || chapter_num > boq.roots.last().and_then(|n| n.oz.parse::<usize>().ok()).unwrap_or(0)) {
                     flush_item(&mut boq, current_chapter, &mut current_item);
                     started = true;
                     let chapter = Node {
@@ -57,6 +59,7 @@ pub fn parse_compact_lv(source: &str, text: &str) -> Result<BillOfQuantities> {
                     current_chapter = Some(boq.roots.len() - 1);
                     continue;
                 }
+            }
             }
             if let Some(caps) = item.captures(line) {
                 let chapter: usize = caps[1].parse()?;
