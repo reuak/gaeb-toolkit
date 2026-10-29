@@ -1614,7 +1614,9 @@ async fn admin_test_convert(
             export_warnings.push(format!("Sicherer X83-Export: {error}"));
             write_x83(&boq, &x83, true)?;
         }
-        inject_pdf_pngs(&input, &x83, &boq)?;
+        if std::env::var("DOLIBARR_COMPATIBLE_X83").as_deref() != Ok("true") {
+            inject_pdf_pngs(&input, &x83, &boq)?;
+        }
         apply_provisional_flags(&x83, &boq)?;
 
         let has_x84 = has_prices(&boq.roots);
@@ -2542,7 +2544,9 @@ async fn process_job(
         }
         match write_x83(&boq, &processing_output, false) {
             Ok(()) => {
-                inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
+                if std::env::var("DOLIBARR_COMPATIBLE_X83").as_deref() != Ok("true") {
+                    inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
+                }
                 apply_provisional_flags(&processing_output, &boq)?;
                 if includes_prices {
                     write_x84(&boq, &processing_priced_output, false)?;
@@ -2553,7 +2557,9 @@ async fn process_job(
             }
             Err(error) if record.email_fallback_consent => {
                 write_x83(&boq, &processing_output, true)?;
-                inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
+                if std::env::var("DOLIBARR_COMPATIBLE_X83").as_deref() != Ok("true") {
+                    inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
+                }
                 apply_provisional_flags(&processing_output, &boq)?;
                 let report_text = format!(
                     "PRÜFPFLICHTIGER X83-ENTWURF\n\
