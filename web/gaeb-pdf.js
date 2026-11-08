@@ -3,7 +3,7 @@ const input = document.querySelector("#gaeb");
 const meta = document.querySelector("#gaeb-file-meta");
 const note = document.querySelector("#gaeb-note");
 const outputSelect = document.querySelector("#gaeb-output-format");
-const checkoutForm = document.querySelector("#gaeb-pro-checkout");
+const checkoutForms = document.querySelectorAll(".checkout-form");
 const allowedExtensions = new Set(["d81", "d83", "d84", "p81", "p83", "p84", "x80", "x81", "x82", "x83", "x84", "x85", "x86", "x89", "xml"]);
 let limit = 2 * 1024 * 1024;
 
@@ -32,11 +32,11 @@ async function init() {
       const upsell = document.querySelector("#gaeb-pro-upsell");
       if (upsell) upsell.hidden = true;
       document.querySelector("#gaeb-pro-card")?.classList.add("is-current");
-      const checkoutButton = checkoutForm?.querySelector("button");
-      if (checkoutButton) {
+      checkoutForms.forEach((checkoutForm) => {
+        const checkoutButton = checkoutForm.querySelector("button");
         checkoutButton.disabled = true;
         checkoutButton.textContent = "GAEB Pro ist aktiv";
-      }
+      });
     } else {
       document.querySelector("#free-fields input[type=email]").required = true;
       document.querySelector("#free-fields input[type=checkbox]").required = true;
@@ -47,23 +47,27 @@ async function init() {
 }
 
 async function initializeCheckout() {
-  if (!checkoutForm) return;
-  const button = checkoutForm.querySelector("button");
-  const checkoutNote = checkoutForm.querySelector(".checkout-note");
+  if (!checkoutForms.length) return;
   try {
     const response = await fetch("/api/billing/config");
     const config = await response.json();
     if (!config.enabled) {
-      button.disabled = true;
-      checkoutNote.textContent = "Der Pro-Checkout wird in Kürze freigeschaltet.";
+      checkoutForms.forEach((checkoutForm) => {
+        checkoutForm.querySelector("button").disabled = true;
+        checkoutForm.querySelector(".checkout-note").textContent = "Der Pro-Checkout wird in Kürze freigeschaltet.";
+      });
     }
   } catch (_) {
-    button.disabled = true;
-    checkoutNote.textContent = "Der Bezahlbereich konnte nicht geladen werden.";
+    checkoutForms.forEach((checkoutForm) => {
+      checkoutForm.querySelector("button").disabled = true;
+      checkoutForm.querySelector(".checkout-note").textContent = "Der Bezahlbereich konnte nicht geladen werden.";
+    });
   }
 
-  checkoutForm.addEventListener("submit", async (event) => {
+  checkoutForms.forEach((checkoutForm) => checkoutForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const button = checkoutForm.querySelector("button");
+    const checkoutNote = checkoutForm.querySelector(".checkout-note");
     const emailInput = checkoutForm.querySelector('input[type="email"]');
     if (!emailInput?.checkValidity()) {
       checkoutNote.textContent = "Bitte eine gültige E-Mail-Adresse eingeben.";
@@ -76,16 +80,17 @@ async function initializeCheckout() {
       const response = await fetch("/api/billing/checkout", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ offer: "pro", email: new FormData(checkoutForm).get("email") }),
+        body: JSON.stringify({ offer: checkoutForm.dataset.offer, email: new FormData(checkoutForm).get("email"), password: new FormData(checkoutForm).get("password") || null }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Checkout konnte nicht geöffnet werden.");
+      window.gaebTrackEvent?.("checkout_started", { offer: checkoutForm.dataset.offer, source: "gaeb_to_pdf" });
       window.location.assign(data.url);
     } catch (error) {
       checkoutNote.textContent = error.message;
       button.disabled = false;
     }
-  });
+  }));
 }
 
 input.addEventListener("change", () => {
@@ -131,6 +136,9 @@ form.addEventListener("submit", async (event) => {
       const data = await response.json();
       throw new Error(data.error || "Konvertierung fehlgeschlagen.");
     }
+    if (!document.body.classList.contains("billing-active")) {
+      window.gaebTrackEvent?.("free_conversion_success", { direction: "gaeb_to_pdf" });
+    }
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a");
     link.href = url;
@@ -140,7 +148,14 @@ form.addEventListener("submit", async (event) => {
     URL.revokeObjectURL(url);
     note.textContent = "PDF wurde erstellt und heruntergeladen.";
   } catch (error) {
-    note.textContent = error.message;
+    const freeLimitReached = error.message.includes("einmalige kostenlose Konvertierung");
+    note.classList.toggle("is-error", freeLimitReached);
+    if (freeLimitReached) {
+      note.innerHTML = '<strong>Die kostenlose Konvertierung wurde bereits genutzt.</strong><span>Mit GAEB Pro können Sie sofort weiterarbeiten.</span><a href="#preise">Pro-Angebote ansehen →</a>';
+      note.scrollIntoView({ behavior: "smooth", block: "center" });
+    } else {
+      note.textContent = error.message;
+    }
   } finally {
     button.disabled = false;
   }

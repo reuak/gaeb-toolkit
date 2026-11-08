@@ -68,6 +68,11 @@ button, a, .file-drop { touch-action: manipulation; }
 .main-nav { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
 .main-nav a { padding:9px 12px; border-radius:10px; color:var(--muted); font-size:13px; font-weight:700; text-decoration:none; }
 .main-nav a:hover,.main-nav a.is-active { background:rgba(13,107,79,.09); color:var(--green); }
+.main-nav .pro-nav {
+  background: var(--green);
+  color: white;
+}
+.main-nav .pro-nav:hover { background: var(--green-dark); color: white; }
 
 main { overflow: hidden; }
 .hero {
@@ -115,6 +120,35 @@ h1 {
   line-height: 1.5;
 }
 .sales-highlight strong { color: var(--green-dark); }
+.hero-pro {
+  max-width: 600px;
+  margin: -12px 0 20px;
+  padding: 12px 14px;
+  border: 1px solid rgba(13, 107, 79, 0.2);
+  border-radius: 15px;
+  background: linear-gradient(105deg, rgba(13, 107, 79, 0.09), rgba(201, 232, 108, 0.2));
+  color: var(--ink);
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: center;
+  text-decoration: none;
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+.hero-pro:hover { border-color: var(--green); transform: translateY(-1px); }
+.hero-pro-mark {
+  padding: 8px 9px;
+  border-radius: 9px;
+  background: var(--green);
+  color: white;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+}
+.hero-pro-copy strong, .hero-pro-copy small { display: block; }
+.hero-pro-copy strong { font-size: 14px; }
+.hero-pro-copy small { margin-top: 2px; color: var(--muted); font-size: 11px; }
+.hero-pro-arrow { color: var(--green); font-size: 20px; font-weight: 800; }
 .trust-row {
   display: flex;
   flex-wrap: wrap;
@@ -348,6 +382,25 @@ body.billing-active .trust-row span:first-child {
 .primary-button[aria-busy="true"] { cursor: progress; }
 .secondary-button { margin-top: 10px; background: #edf0eb; color: var(--ink); }
 .form-note { margin: 10px 0 0; color: #78847f; text-align: center; font-size: 10px; }
+.conversion-limit-alert,
+.form-note.is-error {
+  display: grid;
+  gap: 7px;
+  margin: 16px 0 0;
+  padding: 16px 18px;
+  border: 1px solid rgba(165, 62, 53, 0.3);
+  border-radius: 14px;
+  background: #fff3ee;
+  color: var(--ink);
+  text-align: left;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+.conversion-limit-alert[hidden] { display: none; }
+.conversion-limit-alert strong,
+.form-note.is-error strong { color: var(--error); font-size: 1.05rem; }
+.conversion-limit-alert a,
+.form-note.is-error a { color: var(--green); font-weight: 800; }
 
 .legal-panel {
   width: min(1180px, calc(100% - 40px));
@@ -520,6 +573,9 @@ body.billing-active .trust-row span:first-child {
 .pricing-grid.pro-only {
   grid-template-columns: minmax(280px, 430px);
 }
+.pricing-grid.pro-plans {
+  grid-template-columns: repeat(2, minmax(250px, 1fr));
+}
 .offer-options { width: min(680px, 100%); }
 
 .price-card {
@@ -599,6 +655,11 @@ body.billing-active .trust-row span:first-child {
 .paid-preview .eyebrow { color: var(--lime); }
 
 .account-main { width: min(1040px, calc(100% - 32px)); margin: 70px auto; }
+.account-upsell { border-color: rgba(13, 107, 79, 0.25); background: linear-gradient(135deg, #fffdf8, #f1f7e8); }
+.account-upsell > h2 { margin-top: 0; }
+.account-upsell .pricing-grid { margin-top: 24px; width: 100%; }
+.account-checkout-form label { display: grid; gap: 6px; margin-bottom: 12px; }
+.account-checkout-form input { width: 100%; height: 43px; padding: 0 13px; border: 1px solid var(--line); border-radius: 10px; }
 .tool-page { width:min(1180px,calc(100% - 40px)); margin:46px auto 90px; display:grid; grid-template-columns:minmax(0,1fr) minmax(420px,.8fr); gap:clamp(45px,7vw,100px); align-items:center; overflow:visible; }
 .tool-intro h1 { margin-bottom:24px; }.tool-page .converter-card { align-self:start; }
 #free-fields { display:grid; gap:14px; } #free-fields > label:first-child { display:grid; gap:6px; }
@@ -686,6 +747,7 @@ footer nav { display: flex; flex-wrap: wrap; gap: 18px; }
   .hero { margin-top: 25px; grid-template-columns: 1fr; }
   .hero-copy { text-align: center; }
   .intro { margin-left: auto; margin-right: auto; }
+  .hero-pro { margin-left: auto; margin-right: auto; text-align: left; }
   .trust-row { justify-content: center; }
   .converter-card { width: min(100%, 620px); margin: 0 auto; }
   .how-it-works { grid-template-columns: 1fr; gap: 35px; }
@@ -702,6 +764,8 @@ footer nav { display: flex; flex-wrap: wrap; gap: 18px; }
   .sales-title { font-size: 36px; line-height: 1.02; }
   .intro { margin-top: 15px; margin-bottom: 15px; font-size: 15px; }
   .sales-highlight { padding: 11px 13px; }
+  .hero-pro { margin-top: -4px; margin-bottom: 0; padding: 10px 11px; }
+  .hero .trust-row { display: none; }
   .converter-card { padding: 23px 17px; border-radius: 20px; }
   .reel-section { padding: 28px 18px; border-radius: 20px; }
   .field-grid { grid-template-columns: 1fr; }

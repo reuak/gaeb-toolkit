@@ -30,6 +30,27 @@
     }
   }
 
+  window.gaebTrackEvent = (name, parameters = {}) => {
+    const choice = readChoice();
+    if (!choice || (!choice.analytics && !choice.marketing)) return false;
+    apply(choice);
+    window.gtag?.("event", name, parameters);
+    if (name === "purchase" && choice.marketing && config.google_ads_purchase_send_to) {
+      window.gtag?.("event", "conversion", {
+        send_to: config.google_ads_purchase_send_to,
+        value: parameters.value,
+        currency: parameters.currency,
+        transaction_id: parameters.transaction_id,
+      });
+    }
+    if (choice.marketing && window.fbq) {
+      const metaEvent = name === "purchase" ? "Purchase" : name === "checkout_started" ? "InitiateCheckout" : null;
+      if (metaEvent) window.fbq("track", metaEvent, parameters);
+      else window.fbq("trackCustom", name, parameters);
+    }
+    return true;
+  };
+
   function injectScript(src) {
     const script = document.createElement("script");
     script.async = true;

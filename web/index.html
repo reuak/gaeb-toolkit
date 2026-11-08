@@ -10,10 +10,10 @@
     <meta name="theme-color" content="#f4f2e9" />
     <title>LV Konverter · PDF und GAEB lesbar austauschen</title>
     <link rel="icon" type="image/png" href="/assets/gaeb-konverter-icon.png?v=2" />
-    <link rel="stylesheet" href="/styles.css?v=16" />
-    <script src="/offer.js?v=2" defer></script>
-    <script src="/app.js?v=14" defer></script>
-    <script src="/consent.js?v=2" defer></script>
+    <link rel="stylesheet" href="/styles.css?v=19" />
+    <script src="/offer.js?v=4" defer></script>
+    <script src="/app.js?v=18" defer></script>
+    <script src="/consent.js?v=3" defer></script>
   </head>
   <body>
     <aside class="offer-banner" id="offer-banner" hidden></aside>
@@ -24,7 +24,7 @@
       </a>
       <nav class="main-nav" aria-label="Hauptnavigation">
         <a class="is-active" href="/">PDF → GAEB</a><a href="/gaeb-pdf.html">GAEB → PDF</a>
-        <a href="/#preise">Preise</a><a href="/konto.html">Kundenkonto</a>
+        <a class="pro-nav" href="/#preise">GAEB Pro</a><a href="/konto.html">Kundenkonto</a>
       </nav>
     </header>
 
@@ -39,9 +39,17 @@
             <strong>GAEB → PDF. PDF → GAEB.</strong> Schnell, einfach und direkt in gängigen
             Ausschreibungs-, AVA- und Kalkulationsprogrammen weiterverarbeitbar.
           </p>
+          <a class="hero-pro" href="#preise" aria-label="GAEB Pro Tarife ansehen">
+            <span class="hero-pro-mark">PRO</span>
+            <span class="hero-pro-copy">
+              <strong>100 Konvertierungen pro Monat</strong>
+              <small>ab <span data-price-plan="monthly">Preis wird geladen …</span> <span data-price-period="monthly"></span></small>
+            </span>
+            <span class="hero-pro-arrow" aria-hidden="true">→</span>
+          </a>
           <div class="trust-row" aria-label="Leistungsmerkmale">
             <span id="trust-size">Bis 2 MB kostenlos</span>
-            <span id="trust-volume">3 Dokumente pro Monat</span>
+            <span id="trust-volume">1 Konvertierung einmalig kostenlos</span>
             <span id="trust-positions">Bis 50 Positionen</span>
             <span id="trust-retention">Löschung nach 24 Stunden</span>
           </div>
@@ -125,6 +133,11 @@
               <span>PDF in X83 konvertieren</span>
               <span aria-hidden="true">→</span>
             </button>
+            <aside class="conversion-limit-alert" id="conversion-limit-alert" hidden role="alert">
+              <strong>Die kostenlose Konvertierung wurde bereits genutzt.</strong>
+              <span>Mit GAEB Pro können Sie sofort weiterarbeiten.</span>
+              <a href="#preise">Pro-Angebote ansehen →</a>
+            </aside>
             <div class="preflight-progress" id="preflight-progress" hidden aria-live="polite">
               <div class="preflight-heading"><strong id="preflight-status">Datei wird vorbereitet …</strong><span id="preflight-percent">10 %</span></div>
               <div class="progress"><span id="preflight-bar"></span></div>
@@ -200,18 +213,27 @@
           </p>
         </div>
         <div class="offer-options">
-          <div class="pricing-grid pro-only">
-            <article class="price-card featured">
-            <p class="step-label">Pro-Abo</p>
-            <p class="price-offer-label" id="pro-offer-label">Einführungsangebot</p>
-            <p class="regular-price" id="pro-regular-row">Regulär <del id="pro-regular-price">19,00 €</del></p>
-            <h3><span id="pro-price">12,99 €</span> <small>netto / Monat</small></h3>
+          <div class="pricing-grid pro-plans">
+            <article class="price-card featured" data-price-card="monthly">
+            <p class="step-label">Pro monatlich</p>
+            <h3><span data-price-plan="monthly">Preis wird geladen …</span> <small data-price-period="monthly"></small></h3>
             <p>100 Konvertierungen monatlich für PDF → GAEB und GAEB → PDF, bis 25 MB je Datei und insgesamt 2 GB Speicher.</p>
-            <form class="checkout-form" data-offer="pro" novalidate>
+            <form class="checkout-form" data-offer="pro_monthly" novalidate>
               <label><span>E-Mail</span><input type="email" name="email" required autocomplete="email" /></label>
-              <button class="primary-button checkout-button" type="submit">Pro starten</button>
+              <button class="primary-button checkout-button" type="submit">Monatsabo starten</button>
               <p class="checkout-note" aria-live="polite"></p>
             </form>
+            </article>
+            <article class="price-card" data-price-card="yearly" hidden>
+              <p class="step-label">Pro jährlich</p>
+              <h3><span data-price-plan="yearly">Preis wird geladen …</span> <small data-price-period="yearly"></small></h3>
+              <p>Dieselben Pro-Leistungen mit jährlicher Abrechnung zum in Stripe hinterlegten Preis.</p>
+              <form class="checkout-form" data-offer="pro_yearly" novalidate>
+                <label><span>E-Mail</span><input type="email" name="email" required autocomplete="email" /></label>
+                <label><span>Passwort (mindestens 12 Zeichen)</span><input type="password" name="password" required minlength="12" autocomplete="new-password" /></label>
+                <button class="primary-button checkout-button" type="submit">Jahresabo starten</button>
+                <p class="checkout-note" aria-live="polite"></p>
+              </form>
             </article>
           </div>
           <aside class="enterprise-note">

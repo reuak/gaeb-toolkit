@@ -81,14 +81,14 @@ Die erste Webversion bietet:
 
 - PDF-Upload bis 2 MB
 - Kontaktdaten und Einwilligung
-- drei kostenlose Konvertierungen pro E-Mail und Monat, jeweils bis 50 Positionen
+- eine einmalige kostenlose Konvertierung pro E-Mail, bis 50 Positionen
 - asynchrone PDF-zu-X83-Konvertierung
 - direkte GAEB-90-D81/D83/D84-, GAEB-DA-2000-P81/P83/P84- und
   GAEB-DA-XML-X80-bis-X86/X89-zu-PDF-Lesefassung ohne Dokumentenspeicherung
 - Modernisierung von D81/D83 und P81/P83/P84 nach GAEB DA XML X83
 - Angebotskonvertierung von bepreisten X84-Dateien nach GAEB DA 2000 P84
 - Angebotskonvertierung von bepreisten X84-Dateien nach GAEB 90 D84
-- gemeinsames Monatskontingent für beide Richtungen: 3 kostenlos, 100 mit aktivem Pro-Abo
+- gemeinsames Kontingent für beide Richtungen: 1 einmalig kostenlos, 100 pro Monat mit aktivem Pro-Abo
 - geschützten Download-Link
 - automatische Löschung nach 24 Stunden
 - optionaler, ausdrücklich prüfpflichtiger X83-Entwurf mit Original-PDF und
@@ -136,6 +136,7 @@ MAX_UPLOAD_BYTES=2097152
 PAID_MAX_UPLOAD_BYTES=26214400
 RETENTION_HOURS=24
 DIAGNOSTIC_RETENTION_DAYS=30
+FREE_TRIAL_HASH_SECRET=
 SMTP_HOST=mail.example.de
 SMTP_PORT=587
 SMTP_USERNAME=gaeb@example.de
@@ -144,6 +145,7 @@ SMTP_FROM=gaeb@example.de
 GOOGLE_TAG_MANAGER_ID=GTM-TF86FD6Z
 GOOGLE_ANALYTICS_ID=
 GOOGLE_ADS_ID=AW-18376784283
+GOOGLE_ADS_PURCHASE_SEND_TO=
 META_PIXEL_ID=
 KLICKTIPP_PIXEL_URL=
 COOKIE_CONSENT_VERSION=3
@@ -152,10 +154,7 @@ STRIPE_SECRET_KEY=
 STRIPE_WEBHOOK_SECRET=
 STRIPE_SINGLE_PRICE_ID=
 STRIPE_PRO_PRICE_ID=
-SINGLE_NET_CENTS=990
-PRO_NET_CENTS=1900
-REGULAR_SINGLE_NET_CENTS=990
-REGULAR_PRO_NET_CENTS=1900
+STRIPE_PRO_YEARLY_PRICE_ID=
 OFFER_BANNER_TEXT=
 ADMIN_TOKEN=
 INTEGRATION_API_KEYS=
@@ -163,11 +162,10 @@ TEST_LAB_ENABLED=false
 RUST_LOG=info
 ```
 
-Die angezeigten Cent-Beträge müssen immer exakt zu den hinterlegten Stripe-Price-IDs
-passen. Für einen Aktionspreis werden in Stripe neue Preise angelegt und anschließend
-Price-ID und Cent-Betrag gemeinsam umgestellt. `REGULAR_SINGLE_NET_CENTS` und
-`REGULAR_PRO_NET_CENTS` steuern ausschließlich den durchgestrichenen Vergleichspreis;
-sie werden nur angezeigt, wenn der jeweilige aktuelle Preis niedriger ist.
+Die Weboberfläche liest Betrag, Währung und Abrechnungsintervall direkt aus den
+konfigurierten Stripe-Price-Objekten. Preise werden daher ausschließlich in Stripe
+gepflegt. `STRIPE_PRO_YEARLY_PRICE_ID` ist optional; sobald sie gesetzt ist, zeigt
+die Website zusätzlich das Jahresabo an.
 `OFFER_BANNER_TEXT` aktiviert optional ein Aktionsbanner. Der interne Bereich `/admin.html` ist nur verfügbar, wenn ein langer,
 zufälliger `ADMIN_TOKEN` gesetzt wurde.
 Das PDF-Stapel-Testlabor unter `/testlabor.html` und sein API-Endpunkt sind nur
@@ -217,8 +215,8 @@ internen Arbeitsabläufen verwendet werden. Die maximale Dateigröße entspricht
 
 ### Stripe im Testmodus
 
-Im Stripe-Dashboard wird für das sichtbare Pro-Angebot ein monatlich
-wiederkehrender Preis angelegt. Seine `price_...`-ID und der Testschlüssel
+Im Stripe-Dashboard werden für Pro je ein monatlich und optional jährlich
+wiederkehrender Preis angelegt. Ihre `price_...`-IDs und der Testschlüssel
 `sk_test_...` werden ausschließlich in der Server-`.env` eingetragen. Die
 `STRIPE_SINGLE_PRICE_ID` ist optional, solange Einzelkäufe nicht angeboten
 werden. Der Webhook zeigt auf:
@@ -228,6 +226,12 @@ Vor einem Live-Test müssen in Stripe Tax die Unternehmensanschrift und die
 erforderlichen Steuerregistrierungen konfiguriert sein; Checkout ermittelt die
 Steuer anhand von Rechnungsanschrift und gegebenenfalls USt-IdNr.
 
+Für vollständige Stripe-Rechnungen wird die eigene USt-IdNr. in den
+Stripe-Rechnungseinstellungen unter den Steuer-IDs hinterlegt und als Standard
+markiert. Die Handelsregisternummer wird in der Standard-Rechnungsvorlage als
+benutzerdefiniertes Feld (zum Beispiel `Handelsregister: HRB …`) gepflegt. Die
+USt-IdNr. des Käufers wird davon getrennt durch den Checkout erfasst.
+
 ```text
 https://gaeb.example.de/api/stripe/webhook
 ```
@@ -236,9 +240,12 @@ Sein Signaturgeheimnis `whsec_...` gehört ebenfalls nur in die `.env`. Der
 Dienst akzeptiert Webhooks höchstens fünf Minuten nach dem Stripe-Zeitstempel
 und verarbeitet jede Event-ID nur einmal. Ein bestätigter Einzelkauf erzeugt
 genau einen Credit, ein bestätigtes Pro-Abo den Pro-Zugang. Der Käufer erhält
-per SMTP einen 24 Stunden gültigen, einmalig verwendbaren Zugangslink. Die
-daraus erzeugte Browser-Sitzung ist 30 Tage gültig; erst sie erlaubt Uploads bis
-25 MB. Bei einem technischen Konvertierungsfehler wird ein reservierter
+per SMTP beim Monatsabo einen 30 Tage gültigen, einmalig verwendbaren
+Zugangslink. Das Jahresabo setzt ein Kundenkonto mit E-Mail und mindestens
+zwölfstelligem Passwort voraus. Passwörter werden ausschließlich als
+Argon2-Hash gespeichert. Die daraus erzeugte Browser-Sitzung ist 30 Tage
+gültig; erst sie erlaubt Uploads bis 25 MB. Bei einem technischen
+Konvertierungsfehler wird ein reservierter
 Einzel-Credit automatisch zurückgebucht.
 
 Die Tracking-Einstellungen sind optional. Ohne Wert wird der jeweilige Dienst

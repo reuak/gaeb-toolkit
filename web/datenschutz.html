@@ -9,7 +9,7 @@
     <link rel="icon" type="image/png" href="/assets/gaeb-konverter-icon.png?v=2" />
     <link rel="stylesheet" href="/styles.css?v=8" />
     <script src="/legal.js" defer></script>
-    <script src="/consent.js?v=2" defer></script>
+    <script src="/consent.js?v=3" defer></script>
   </head>
   <body>
     <header class="site-header">
@@ -78,10 +78,20 @@
           X85 und X86 sowie ältere unterstützte GAEB-Dateien werden zur unmittelbaren
           Erstellung der angeforderten PDF-, X83-, P84- oder D84-Datei verarbeitet. Dabei
           können auch im Dokument enthaltene Angebots- und Preisinformationen in die
-          gewählte Ausgabe übernommen werden. Zur Durchsetzung des
-          für beide Konvertierungsrichtungen gemeinsamen Monatskontingents speichern wir
-          E-Mail-Adresse beziehungsweise Konto-ID, Konvertierungsrichtung, Tarifstufe
-          und Zeitpunkt der Nutzung. Die hochgeladene GAEB-Datei und die erzeugte
+          gewählte Ausgabe übernommen werden. Die kostenlose Konvertierung kann
+          einmalig und gemeinsam für beide Konvertierungsrichtungen genutzt werden.
+          Nach einer erfolgreichen kostenlosen Konvertierung bilden wir aus der
+          normalisierten E-Mail-Adresse mit einem geheimen serverseitigen Schlüssel
+          einen nicht direkt lesbaren Prüfwert. Dieser Prüfwert und der Nutzungszeitpunkt
+          werden zur Verhinderung wiederholter Gratisnutzung gespeichert; die E-Mail-Adresse
+          lässt sich aus dem Prüfwert ohne den geheimen Schlüssel nicht unmittelbar ablesen.
+          Fehlgeschlagene Konvertierungen erzeugen keinen solchen Nutzungsnachweis.
+          Rechtsgrundlage ist unser berechtigtes Interesse an der Verhinderung von
+          Leistungsmissbrauch gemäß Art. 6 Abs. 1 lit. f DSGVO. Der Prüfwert wird nur für
+          diesen Zweck verwendet und solange gespeichert, wie die einmalige kostenlose
+          Nutzung angeboten wird; anschließend wird er gelöscht. Gegen diese Verarbeitung
+          kann aus Gründen, die sich aus der besonderen Situation ergeben, Widerspruch
+          eingelegt werden. Die hochgeladene GAEB-Datei und die erzeugte
           PDF-Datei werden bei dieser unmittelbaren Konvertierung nicht dauerhaft
           gespeichert und nach Abschluss der Anfrage verworfen.
         </p>
@@ -107,10 +117,11 @@
 
         <h2>7. Kundenkonto, Rechnungsanschrift und Zahlungen</h2>
         <p>
-          Für das passwortlose Kundenkonto speichern wir E-Mail-Adresse, Name,
-          optional Unternehmen sowie Straße, Postleitzahl, Ort und Land. Der Zugang
-          wird durch einen zeitlich begrenzten, einmalig verwendbaren Magic-Link
-          verifiziert. Die Daten dienen der Kontoverwaltung, Vertragserfüllung und
+          Für das Kundenkonto speichern wir E-Mail-Adresse, Name, optional Unternehmen
+          sowie Straße, Postleitzahl, Ort und Land. Beim Jahresabo ist ein Passwort
+          erforderlich; dieses wird ausschließlich als gesalzener Argon2-Hash und nicht
+          im Klartext gespeichert. Monatskunden können einen zeitlich begrenzten,
+          einmalig verwendbaren Login-Link nutzen. Die Daten dienen der Kontoverwaltung, Vertragserfüllung und
           Vorbereitung korrekter Abrechnungsunterlagen auf Grundlage von Art. 6
           Abs. 1 lit. b DSGVO. Steuer- und handelsrechtlich erforderliche Kauf- und
           Rechnungsdaten können entsprechend den gesetzlichen Aufbewahrungsfristen
@@ -126,6 +137,13 @@
           Zahlungsart, Zahlungsdaten, Betrag, Produkt, Transaktionskennung, IP-Adresse
           sowie Geräte- und Betrugspräventionsdaten gehören. Vollständige Karten- oder
           Bankzugangsdaten werden nicht auf unserem Server gespeichert.
+        </p>
+        <p>
+          Die im Stripe-Checkout angegebene Rechnungsanschrift wird nach erfolgreichem
+          Kauf in das Kundenkonto übernommen. Änderungen der Rechnungsanschrift im
+          Kundenkonto werden bei einem bereits zugeordneten Stripe-Kunden auch an
+          Stripe übermittelt, damit künftige Rechnungen und Abonnementabrechnungen
+          konsistente Angaben enthalten. Rechtsgrundlage ist Art. 6 Abs. 1 lit. b DSGVO.
         </p>
         <p>
           Die Übermittlung erfolgt zur Vertragsdurchführung und Zahlungsabwicklung auf

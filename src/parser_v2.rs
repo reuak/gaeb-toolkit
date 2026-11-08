@@ -182,6 +182,9 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                     current_position.is_some(),
                     in_lv_table,
                     current_has_quantity,
+                    headings.contains_key(&caps["oz"]),
+                    headings.keys().any(|oz| !oz.contains('.') && oz.len() == 2),
+                    active_heading_oz.as_deref(),
                 )
             }) {
                 finish_position(
@@ -192,15 +195,18 @@ pub fn parse_text(source: &str, text: &str) -> Result<BillOfQuantities> {
                     page_number,
                 );
                 let heading_oz = caps["oz"].to_owned();
-                headings.insert(
-                    heading_oz.clone(),
-                    (
-                        caps.name("title")
-                            .map(|v| v.as_str().trim().to_owned())
-                            .unwrap_or_default(),
-                        page_number,
-                    ),
-                );
+                let mut heading_title = caps
+                    .name("title")
+                    .map(|value| value.as_str().trim().to_owned())
+                    .unwrap_or_default();
+                if !in_lv_table
+                    && heading_title
+                        .chars()
+                        .all(|character| character.is_ascii_digit())
+                {
+                    heading_title.clear();
+                }
+                headings.insert(heading_oz.clone(), (heading_title, page_number));
                 if headings
                     .get(&heading_oz)
                     .is_some_and(|(title, _)| title.to_lowercase().ends_with(" als"))
@@ -505,18 +511,32 @@ fn is_heading_oz(
     position_active: bool,
     in_lv_table: bool,
     current_has_quantity: bool,
+    known_heading: bool,
+    two_digit_root_scheme: bool,
+    active_heading_oz: Option<&str>,
 ) -> bool {
     let components = caps["oz"].split('.').collect::<Vec<_>>();
+    let follows_active_root = components.len() == 1
+        || active_heading_oz
+            .and_then(|oz| oz.split('.').next())
+            .is_some_and(|root| root == components[0]);
+    let single_component_is_heading =
+        components.len() != 1 || known_heading || !two_digit_root_scheme || !in_lv_table;
+    if two_digit_root_scheme && in_lv_table && !follows_active_root {
+        return false;
+    }
     if caps.name("trailing").is_some() {
         components.iter().all(|component| component.len() <= 2)
+            && single_component_is_heading
             && !(position_active && components.len() == 1)
     } else {
         if components.len() == 1 {
-            !position_active
-                || (in_lv_table
-                    && current_has_quantity
-                    && components[0].len() <= 2
-                    && !heading_title_is_quantity_unit(&caps["title"]))
+            single_component_is_heading
+                && (!position_active
+                    || (in_lv_table
+                        && current_has_quantity
+                        && components[0].len() <= 2
+                        && !heading_title_is_quantity_unit(&caps["title"])))
         } else {
             components.len() <= 3 && components.iter().all(|component| component.len() <= 2)
         }

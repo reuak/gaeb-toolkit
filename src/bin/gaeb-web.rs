@@ -8,6 +8,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use argon2::{
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, State},
@@ -41,6 +45,7 @@ use uuid::Uuid;
 const DEFAULT_MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_PAID_MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 const PRO_STORAGE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
+const FREE_LIFETIME_LIMIT: u32 = 1;
 const IMPRINT_URL: &str = "https://www.hawkvision.de/impressum/";
 const IMPRINT_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
@@ -60,12 +65,11 @@ struct AppState {
     offer: OfferConfig,
     admin_token_hash: Option<String>,
     integration_api_key_hashes: Vec<String>,
+    free_trial_hash_secret: String,
 }
 
 #[derive(Clone)]
 struct OfferConfig {
-    single_net_cents: u32,
-    pro_net_cents: u32,
     banner: Option<String>,
 }
 
@@ -75,6 +79,7 @@ struct StripeConfig {
     webhook_secret: String,
     single_price_id: Option<String>,
     pro_price_id: String,
+    pro_yearly_price_id: Option<String>,
     public_base_url: String,
 }
 
@@ -151,11 +156,29 @@ struct IntegrationApiInfo {
 #[derive(Serialize)]
 struct BillingConfigResponse {
     enabled: bool,
-    single_net_cents: u32,
-    pro_net_cents: u32,
-    regular_single_net_cents: u32,
-    regular_pro_net_cents: u32,
+    pro_monthly: Option<PublicStripePrice>,
+    pro_yearly: Option<PublicStripePrice>,
     offer_banner: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PublicStripePrice {
+    amount: i64,
+    currency: String,
+    interval: String,
+}
+
+#[derive(Deserialize)]
+struct StripePrice {
+    active: bool,
+    unit_amount: Option<i64>,
+    currency: String,
+    recurring: Option<StripeRecurring>,
+}
+
+#[derive(Deserialize)]
+struct StripeRecurring {
+    interval: String,
 }
 
 #[derive(Deserialize)]
@@ -228,6 +251,7 @@ struct BillingStatusResponse {
 struct CheckoutRequest {
     offer: String,
     email: String,
+    password: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -241,8 +265,16 @@ struct EmailRequest {
 }
 
 #[derive(Deserialize)]
+struct PasswordLoginRequest {
+    email: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
 struct AccountRegistrationRequest {
     email: String,
+    password: Option<String>,
+    password_confirmation: Option<String>,
     name: String,
     company: String,
     street: String,
@@ -279,6 +311,7 @@ struct CheckoutStatusResponse {
 struct AccountResponse {
     email: String,
     plan: String,
+    subscription_interval: Option<String>,
     billing_address: BillingAddressResponse,
     single_credits: i64,
     storage_used_bytes: i64,
@@ -325,6 +358,7 @@ struct PublicTrackingConfig {
     google_tag_manager_id: Option<String>,
     google_analytics_id: Option<String>,
     google_ads_id: Option<String>,
+    google_ads_purchase_send_to: Option<String>,
     meta_pixel_id: Option<String>,
     klicktipp_pixel_url: Option<String>,
     consent_version: String,
@@ -386,6 +420,11 @@ async fn main() -> Result<()> {
             .filter(|value| value.len() >= 32)
             .map(hash_token)
             .collect(),
+        free_trial_hash_secret: required_env("FREE_TRIAL_HASH_SECRET")
+            .or_else(|| required_env("STRIPE_WEBHOOK_SECRET"))
+            .context(
+                "FREE_TRIAL_HASH_SECRET muss gesetzt sein, wenn Stripe nicht konfiguriert ist",
+            )?,
     });
     init_database(&state)?;
     backfill_stripe_events(&state)?;
@@ -420,6 +459,7 @@ async fn main() -> Result<()> {
         .route("/api/billing/checkout-status", get(checkout_status))
         .route("/api/billing/resend-access", post(resend_access))
         .route("/api/account/login", post(request_account_login))
+        .route("/api/account/password-login", post(password_account_login))
         .route("/api/account/register", post(register_account))
         .route("/api/account/address", post(update_account_address))
         .route("/api/account/logout", post(account_logout))
@@ -744,14 +784,77 @@ async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicTrackin
     Json(state.tracking.clone())
 }
 
-async fn billing_config(State(state): State<Arc<AppState>>) -> Json<BillingConfigResponse> {
-    Json(BillingConfigResponse {
-        enabled: state.stripe.is_some(),
-        single_net_cents: state.offer.single_net_cents,
-        pro_net_cents: state.offer.pro_net_cents,
-        regular_single_net_cents: env_u32("REGULAR_SINGLE_NET_CENTS", 990),
-        regular_pro_net_cents: env_u32("REGULAR_PRO_NET_CENTS", 1900),
+async fn billing_config(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BillingConfigResponse>, ApiError> {
+    let Some(stripe) = state.stripe.as_ref() else {
+        return Ok(Json(BillingConfigResponse {
+            enabled: false,
+            pro_monthly: None,
+            pro_yearly: None,
+            offer_banner: state.offer.banner.clone(),
+        }));
+    };
+    let pro_monthly = fetch_stripe_price(&state, stripe, &stripe.pro_price_id).await?;
+    let pro_yearly = match stripe.pro_yearly_price_id.as_deref() {
+        Some(price_id) => Some(fetch_stripe_price(&state, stripe, price_id).await?),
+        None => None,
+    };
+    Ok(Json(BillingConfigResponse {
+        enabled: true,
+        pro_monthly: Some(pro_monthly),
+        pro_yearly,
         offer_banner: state.offer.banner.clone(),
+    }))
+}
+
+async fn fetch_stripe_price(
+    state: &AppState,
+    stripe: &StripeConfig,
+    price_id: &str,
+) -> Result<PublicStripePrice, ApiError> {
+    let response = state
+        .http_client
+        .get(format!("https://api.stripe.com/v1/prices/{price_id}"))
+        .bearer_auth(&stripe.secret_key)
+        .send()
+        .await
+        .map_err(|error| {
+            error!(%error, %price_id, "stripe price request failed");
+            ApiError::upstream("Die aktuellen Stripe-Preise konnten nicht geladen werden.")
+        })?;
+    if !response.status().is_success() {
+        error!(status = %response.status(), %price_id, "stripe price request rejected");
+        return Err(ApiError::upstream(
+            "Die aktuellen Stripe-Preise konnten nicht geladen werden.",
+        ));
+    }
+    let response_body = response.text().await.map_err(|error| {
+        error!(%error, %price_id, "stripe price response could not be read");
+        ApiError::upstream("Stripe hat ungültige Preisdaten geliefert.")
+    })?;
+    let price: StripePrice = serde_json::from_str(&response_body).map_err(|error| {
+        error!(%error, %price_id, "stripe price response was invalid");
+        ApiError::upstream("Stripe hat ungültige Preisdaten geliefert.")
+    })?;
+    let amount = price
+        .unit_amount
+        .filter(|amount| *amount >= 0)
+        .ok_or_else(|| ApiError::upstream("Der Stripe-Preis hat keinen festen Betrag."))?;
+    let interval = price
+        .recurring
+        .map(|recurring| recurring.interval)
+        .filter(|interval| matches!(interval.as_str(), "month" | "year"))
+        .ok_or_else(|| ApiError::upstream("Der Stripe-Preis ist kein Monats- oder Jahresabo."))?;
+    if !price.active {
+        return Err(ApiError::unavailable(
+            "Der konfigurierte Stripe-Preis ist nicht aktiv.",
+        ));
+    }
+    Ok(PublicStripePrice {
+        amount,
+        currency: price.currency,
+        interval,
     })
 }
 
@@ -811,6 +914,27 @@ async fn create_checkout(
             "Bitte eine gültige E-Mail-Adresse angeben.",
         ));
     }
+    let existing_account: Option<(Option<String>, bool)> = Connection::open(&state.db_path)
+        .map_err(|_| ApiError::internal())?
+        .query_row(
+            "SELECT NULLIF(stripe_customer_id, ''), pro_active FROM billing_accounts WHERE email=?1",
+            [&email],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| ApiError::internal())?;
+    if existing_account.as_ref().is_some_and(|(_, active)| *active)
+        && matches!(request.offer.as_str(), "pro" | "pro_monthly" | "pro_yearly")
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "Für diese E-Mail-Adresse ist GAEB Pro bereits aktiv. Bitte im Kundenkonto anmelden; ein Wechsel ins Jahresabo erfolgt dort ohne zweites Abo.",
+        ));
+    }
+    if request.offer == "pro_yearly" {
+        let password = request.password.as_deref().unwrap_or_default();
+        prepare_yearly_account(&state.db_path, &email, password)?;
+    }
     let (price_id, mode) = match request.offer.as_str() {
         "single" => (
             stripe.single_price_id.as_deref().ok_or_else(|| {
@@ -818,9 +942,16 @@ async fn create_checkout(
             })?,
             "payment",
         ),
-        "pro" => (stripe.pro_price_id.as_str(), "subscription"),
+        "pro" | "pro_monthly" => (stripe.pro_price_id.as_str(), "subscription"),
+        "pro_yearly" => (
+            stripe.pro_yearly_price_id.as_deref().ok_or_else(|| {
+                ApiError::unavailable("Das Jahresabo wird derzeit nicht angeboten.")
+            })?,
+            "subscription",
+        ),
         _ => return Err(ApiError::bad_request("Unbekanntes Angebot.")),
     };
+    let existing_customer_id = existing_account.and_then(|(customer_id, _)| customer_id);
     let success_url = format!(
         "{}/checkout-erfolg.html?session_id={{CHECKOUT_SESSION_ID}}",
         stripe.public_base_url
@@ -830,7 +961,6 @@ async fn create_checkout(
         ("mode", mode),
         ("line_items[0][price]", price_id),
         ("line_items[0][quantity]", "1"),
-        ("customer_email", email.as_str()),
         ("success_url", success_url.as_str()),
         ("cancel_url", cancel_url.as_str()),
         ("billing_address_collection", "required"),
@@ -838,6 +968,13 @@ async fn create_checkout(
         ("automatic_tax[enabled]", "true"),
         ("metadata[offer]", request.offer.as_str()),
     ];
+    if let Some(customer_id) = existing_customer_id.as_deref() {
+        checkout_fields.push(("customer", customer_id));
+        checkout_fields.push(("customer_update[name]", "auto"));
+        checkout_fields.push(("customer_update[address]", "auto"));
+    } else {
+        checkout_fields.push(("customer_email", email.as_str()));
+    }
     if mode == "payment" {
         checkout_fields.push(("customer_creation", "always"));
     }
@@ -889,7 +1026,7 @@ async fn create_checkout(
 async fn checkout_status(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<CheckoutStatusResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let id = query
         .get("session_id")
         .filter(|v| v.starts_with("cs_") && v.len() <= 255)
@@ -902,18 +1039,30 @@ async fn checkout_status(
     let (email, offer, status, sent_at) =
         row.ok_or_else(|| ApiError::not_found("Checkout nicht gefunden."))?;
     let access_ready = status == "paid";
-    let can_resend = access_ready
+    let can_resend = state.smtp.is_some()
+        && access_ready
         && sent_at
             .as_deref()
             .and_then(parse_time)
             .is_none_or(|sent| Utc::now() - sent >= ChronoDuration::minutes(2));
-    Ok(Json(CheckoutStatusResponse {
+    let mut response = Json(CheckoutStatusResponse {
         status,
         offer,
         email_hint: mask_email(&email),
         access_ready,
         can_resend,
-    }))
+    })
+    .into_response();
+    if access_ready {
+        let raw_session =
+            create_billing_session(&state.db_path, &email).map_err(|_| ApiError::internal())?;
+        response.headers_mut().insert(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&billing_session_cookie(&state, &raw_session))
+                .map_err(|_| ApiError::internal())?,
+        );
+    }
+    Ok(response)
 }
 
 async fn resend_access(
@@ -961,6 +1110,47 @@ async fn request_account_login(
         .map_err(|_| ApiError::internal())?;
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn password_account_login(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<PasswordLoginRequest>,
+) -> Result<Response, ApiError> {
+    let email = request.email.trim().to_lowercase();
+    if !valid_email(&email) || request.password.len() > 1024 {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "E-Mail oder Passwort ist nicht korrekt.",
+        ));
+    }
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let password_hash: Option<String> = connection
+        .query_row(
+            "SELECT password_hash FROM billing_accounts WHERE email=?1",
+            [&email],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| ApiError::internal())?;
+    let verified = password_hash
+        .as_deref()
+        .filter(|hash| !hash.is_empty())
+        .is_some_and(|hash| verify_password(&request.password, hash));
+    if !verified {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "E-Mail oder Passwort ist nicht korrekt.",
+        ));
+    }
+    let raw_session =
+        create_billing_session(&state.db_path, &email).map_err(|_| ApiError::internal())?;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&billing_session_cookie(&state, &raw_session))
+            .map_err(|_| ApiError::internal())?,
+    );
+    Ok(response)
 }
 
 fn account_access_email_allowed(connection: &Connection, email: &str) -> Result<bool> {
@@ -1031,6 +1221,9 @@ async fn register_account(
     Json(request): Json<AccountRegistrationRequest>,
 ) -> Result<StatusCode, ApiError> {
     let email = validate_account_registration(&request)?;
+    let password = request.password.as_deref().unwrap_or_default();
+    let confirmation = request.password_confirmation.as_deref().unwrap_or_default();
+    validate_new_password(password, confirmation)?;
     let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
     let exists = connection
         .query_row(
@@ -1042,6 +1235,13 @@ async fn register_account(
     if !exists {
         save_account_address(&connection, &email, &request).map_err(|_| ApiError::internal())?;
     }
+    let password_hash = hash_password(password)?;
+    connection
+        .execute(
+            "UPDATE billing_accounts SET password_hash=?1, updated_at=?2 WHERE email=?3",
+            params![password_hash, Utc::now().to_rfc3339(), email],
+        )
+        .map_err(|_| ApiError::internal())?;
     if account_access_email_allowed(&connection, &email).map_err(|_| ApiError::internal())? {
         issue_billing_access_email(
             &state,
@@ -1065,8 +1265,84 @@ async fn update_account_address(
         .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Bitte zuerst anmelden."))?;
     validate_account_registration(&request)?;
     let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let customer_id: Option<String> = connection
+        .query_row(
+            "SELECT NULLIF(stripe_customer_id, '') FROM billing_accounts WHERE email=?1",
+            [&access.email],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| ApiError::internal())?
+        .flatten();
+    if let Some(customer_id) = customer_id {
+        sync_address_to_stripe(&state, &customer_id, &request).await?;
+    }
     save_account_address(&connection, &access.email, &request).map_err(|_| ApiError::internal())?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn sync_address_to_stripe(
+    state: &AppState,
+    customer_id: &str,
+    request: &AccountRegistrationRequest,
+) -> Result<(), ApiError> {
+    let stripe = state
+        .stripe
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("Stripe ist nicht konfiguriert."))?;
+    let country = stripe_country_code(&request.country);
+    let mut fields = vec![
+        ("name", request.name.trim().to_owned()),
+        ("address[line1]", request.street.trim().to_owned()),
+        (
+            "address[postal_code]",
+            request.postal_code.trim().to_owned(),
+        ),
+        ("address[city]", request.city.trim().to_owned()),
+    ];
+    if !request.company.trim().is_empty() {
+        fields.push(("address[line2]", request.company.trim().to_owned()));
+    }
+    if let Some(country) = country {
+        fields.push(("address[country]", country));
+    }
+    let response = state
+        .http_client
+        .post(format!("https://api.stripe.com/v1/customers/{customer_id}"))
+        .bearer_auth(&stripe.secret_key)
+        .form(&fields)
+        .send()
+        .await
+        .map_err(|error| {
+            error!(%error, %customer_id, "stripe customer update failed");
+            ApiError::upstream(
+                "Die Rechnungsanschrift konnte nicht mit Stripe synchronisiert werden.",
+            )
+        })?;
+    if !response.status().is_success() {
+        error!(status = %response.status(), %customer_id, "stripe customer update rejected");
+        return Err(ApiError::upstream(
+            "Die Rechnungsanschrift konnte nicht mit Stripe synchronisiert werden.",
+        ));
+    }
+    Ok(())
+}
+
+fn stripe_country_code(country: &str) -> Option<String> {
+    let trimmed = country.trim();
+    if trimmed.len() == 2
+        && trimmed
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+    {
+        return Some(trimmed.to_ascii_uppercase());
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "deutschland" | "germany" => Some("DE".to_owned()),
+        "österreich" | "austria" => Some("AT".to_owned()),
+        "schweiz" | "switzerland" => Some("CH".to_owned()),
+        _ => None,
+    }
 }
 
 async fn account_logout(
@@ -1105,9 +1381,14 @@ async fn account_overview(
             )
         })?;
     let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
-    let (pro, credits, billing_address): (bool, i64, BillingAddressResponse) = connection
+    let (pro, credits, subscription_interval, billing_address): (
+        bool,
+        i64,
+        Option<String>,
+        BillingAddressResponse,
+    ) = connection
         .query_row(
-            "SELECT pro_active, single_credits, billing_name, billing_company, billing_street,
+            "SELECT pro_active, single_credits, NULLIF(subscription_interval, ''), billing_name, billing_company, billing_street,
                     billing_postal_code, billing_city, billing_country
              FROM billing_accounts WHERE email = ?1",
             [&access.email],
@@ -1115,13 +1396,14 @@ async fn account_overview(
                 Ok((
                     r.get(0)?,
                     r.get(1)?,
+                    r.get(2)?,
                     BillingAddressResponse {
-                        name: r.get(2)?,
-                        company: r.get(3)?,
-                        street: r.get(4)?,
-                        postal_code: r.get(5)?,
-                        city: r.get(6)?,
-                        country: r.get(7)?,
+                        name: r.get(3)?,
+                        company: r.get(4)?,
+                        street: r.get(5)?,
+                        postal_code: r.get(6)?,
+                        city: r.get(7)?,
+                        country: r.get(8)?,
                     },
                 ))
             },
@@ -1175,12 +1457,32 @@ async fn account_overview(
         .map(|d| d.size_bytes)
         .sum();
     let usage_tier = if pro { "pro" } else { "free" };
+    let usage_period_filter = if pro {
+        " AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')"
+    } else {
+        ""
+    };
     let job_usage: u32 = connection.query_row(
-        "SELECT COUNT(*) FROM jobs WHERE email=?1 AND billing_tier=?2 AND status!='failed' AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')",
+        &format!("SELECT COUNT(*) FROM jobs WHERE email=?1 AND billing_tier=?2 AND status!='failed'{usage_period_filter}"),
         params![access.email, usage_tier], |r| r.get(0)).map_err(|_| ApiError::internal())?;
     let direct_usage: u32 = connection.query_row(
-        "SELECT COUNT(*) FROM conversion_usage WHERE email=?1 AND billing_tier=?2 AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')",
+        &format!("SELECT COUNT(*) FROM conversion_usage WHERE email=?1 AND billing_tier=?2{usage_period_filter}"),
         params![access.email, usage_tier], |r| r.get(0)).map_err(|_| ApiError::internal())?;
+    let usage = if pro {
+        job_usage.saturating_add(direct_usage)
+    } else {
+        let recorded: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM free_trials WHERE identity_hash=?1)",
+                [free_trial_identity(
+                    &state.free_trial_hash_secret,
+                    &access.email,
+                )],
+                |row| row.get(0),
+            )
+            .map_err(|_| ApiError::internal())?;
+        u32::from(recorded || job_usage.saturating_add(direct_usage) > 0)
+    };
     Ok(Json(AccountResponse {
         email: access.email,
         plan: if pro {
@@ -1191,12 +1493,13 @@ async fn account_overview(
             "free"
         }
         .into(),
+        subscription_interval,
         billing_address,
         single_credits: credits,
         storage_used_bytes,
         storage_limit_bytes: if pro { PRO_STORAGE_BYTES } else { 0 },
-        monthly_conversions: job_usage.saturating_add(direct_usage),
-        monthly_limit: if pro { 100 } else { 3 },
+        monthly_conversions: usage,
+        monthly_limit: if pro { 100 } else { FREE_LIFETIME_LIMIT },
         purchases,
         documents,
     }))
@@ -1757,9 +2060,7 @@ async fn activate_billing_access(
                 error!(%error, "billing access token could not be activated");
                 ApiError::bad_request("Der Zugangslink ist ungültig oder abgelaufen.")
             })?;
-    let cookie = format!(
-        "gaeb_session={raw_session}; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=Lax"
-    );
+    let cookie = billing_session_cookie(&state, &raw_session);
     let target = if redirect_path == "/konto.html" {
         "/konto.html"
     } else {
@@ -1859,11 +2160,12 @@ fn record_and_apply_stripe_event(
             let subscription_id = object["subscription"].as_str().unwrap_or_default();
             transaction.execute(
                 "INSERT INTO billing_accounts
-                 (email, stripe_customer_id, stripe_subscription_id, pro_active, single_credits, updated_at, access_email_sent_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+                 (email, stripe_customer_id, stripe_subscription_id, subscription_interval, pro_active, single_credits, updated_at, access_email_sent_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)
                  ON CONFLICT(email) DO UPDATE SET
                    stripe_customer_id = CASE WHEN excluded.stripe_customer_id != '' THEN excluded.stripe_customer_id ELSE billing_accounts.stripe_customer_id END,
                    stripe_subscription_id = CASE WHEN excluded.stripe_subscription_id != '' THEN excluded.stripe_subscription_id ELSE billing_accounts.stripe_subscription_id END,
+                   subscription_interval = CASE WHEN excluded.subscription_interval != '' THEN excluded.subscription_interval ELSE billing_accounts.subscription_interval END,
                    pro_active = MAX(billing_accounts.pro_active, excluded.pro_active),
                    single_credits = billing_accounts.single_credits + excluded.single_credits,
                    updated_at = excluded.updated_at,
@@ -1872,11 +2174,32 @@ fn record_and_apply_stripe_event(
                     email,
                     customer_id,
                     subscription_id,
-                    offer == "pro",
+                    match offer.as_str() { "pro_yearly" => "yearly", "pro" | "pro_monthly" => "monthly", _ => "" },
+                    is_pro_offer(&offer),
                     i64::from(offer == "single"),
                     Utc::now().to_rfc3339()
                 ],
             )?;
+            let customer_name = object["customer_details"]["name"]
+                .as_str()
+                .unwrap_or_default();
+            let address = &object["customer_details"]["address"];
+            let street = address["line1"].as_str().unwrap_or_default();
+            let postal_code = address["postal_code"].as_str().unwrap_or_default();
+            let city = address["city"].as_str().unwrap_or_default();
+            let country = address["country"].as_str().unwrap_or_default();
+            if !customer_name.is_empty() || !street.is_empty() {
+                transaction.execute(
+                    "UPDATE billing_accounts SET
+                       billing_name=CASE WHEN ?1 != '' THEN ?1 ELSE billing_name END,
+                       billing_street=CASE WHEN ?2 != '' THEN ?2 ELSE billing_street END,
+                       billing_postal_code=CASE WHEN ?3 != '' THEN ?3 ELSE billing_postal_code END,
+                       billing_city=CASE WHEN ?4 != '' THEN ?4 ELSE billing_city END,
+                       billing_country=CASE WHEN ?5 != '' THEN ?5 ELSE billing_country END
+                     WHERE email=?6",
+                    params![customer_name, street, postal_code, city, country, email],
+                )?;
+            }
             transaction.execute(
                 "UPDATE checkout_sessions SET status='paid', updated_at=?1 WHERE id=?2",
                 params![Utc::now().to_rfc3339(), checkout_id],
@@ -1893,7 +2216,7 @@ fn record_and_apply_stripe_event(
                     params![format!("purchase:{checkout_id}"), email, checkout_id, Utc::now().to_rfc3339()],
                 )?;
             }
-            matches!(offer.as_str(), "single" | "pro").then_some(PurchaseNotice { email, offer })
+            (offer == "single" || is_pro_offer(&offer)).then_some(PurchaseNotice { email, offer })
         }
         "invoice.paid" => {
             if let Some(customer_id) = object["customer"].as_str() {
@@ -1901,6 +2224,24 @@ fn record_and_apply_stripe_event(
                     "UPDATE billing_accounts SET pro_active = 1, updated_at = ?1 WHERE stripe_customer_id = ?2",
                     params![Utc::now().to_rfc3339(), customer_id],
                 )?;
+            }
+            None
+        }
+        "customer.subscription.created" | "customer.subscription.updated" => {
+            if let Some(customer_id) = object["customer"].as_str() {
+                let interval = object["items"]["data"][0]["price"]["recurring"]["interval"]
+                    .as_str()
+                    .and_then(|value| match value {
+                        "year" => Some("yearly"),
+                        "month" => Some("monthly"),
+                        _ => None,
+                    });
+                if let Some(interval) = interval {
+                    transaction.execute(
+                        "UPDATE billing_accounts SET subscription_interval=?1, pro_active=1, updated_at=?2 WHERE stripe_customer_id=?3",
+                        params![interval, Utc::now().to_rfc3339(), customer_id],
+                    )?;
+                }
             }
             None
         }
@@ -2091,6 +2432,7 @@ async fn gaeb_to_pdf(
     let usage_id = Uuid::new_v4().simple().to_string();
     reserve_conversion_usage(
         &state.db_path,
+        &state.free_trial_hash_secret,
         &usage_id,
         &account_email,
         "gaeb_to_pdf",
@@ -2100,7 +2442,11 @@ async fn gaeb_to_pdf(
     .map_err(|error| match error.downcast_ref::<UsageLimitReached>() {
         Some(_) => ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
-            format!("Das gemeinsame Monatslimit von {monthly_limit} Konvertierungen ist erreicht."),
+            if tier == "free" {
+                "Die einmalige kostenlose Konvertierung wurde bereits genutzt.".to_owned()
+            } else {
+                format!("Das gemeinsame Monatslimit von {monthly_limit} Konvertierungen ist erreicht.")
+            },
         ),
         None => ApiError::internal(),
     })?;
@@ -2138,6 +2484,9 @@ async fn gaeb_to_pdf(
             )));
         }
     };
+    if tier == "free" {
+        mark_free_trial_used(&state, &account_email).map_err(|_| ApiError::internal())?;
+    }
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -2205,12 +2554,13 @@ fn gaeb_conversion_access(
         submitted_email.to_owned(),
         "free",
         state.max_upload_bytes,
-        3,
+        FREE_LIFETIME_LIMIT,
     ))
 }
 
 fn reserve_conversion_usage(
     db_path: &Path,
+    free_trial_hash_secret: &str,
     id: &str,
     email: &str,
     direction: &str,
@@ -2219,11 +2569,26 @@ fn reserve_conversion_usage(
 ) -> Result<()> {
     let mut connection = Connection::open(db_path)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if tier == "free" {
+        let already_used: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM free_trials WHERE identity_hash=?1)",
+            [free_trial_identity(free_trial_hash_secret, email)],
+            |row| row.get(0),
+        )?;
+        if already_used {
+            return Err(UsageLimitReached.into());
+        }
+    }
+    let period_filter = if tier == "free" {
+        ""
+    } else {
+        " AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')"
+    };
     let jobs: u32 = transaction.query_row(
-        "SELECT COUNT(*) FROM jobs WHERE email=?1 AND status!='failed' AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now') AND billing_tier=?2",
+        &format!("SELECT COUNT(*) FROM jobs WHERE email=?1 AND status!='failed' AND billing_tier=?2{period_filter}"),
         params![email,tier], |r| r.get(0))?;
     let direct: u32 = transaction.query_row(
-        "SELECT COUNT(*) FROM conversion_usage WHERE email=?1 AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now') AND billing_tier=?2",
+        &format!("SELECT COUNT(*) FROM conversion_usage WHERE email=?1 AND billing_tier=?2{period_filter}"),
         params![email,tier], |r| r.get(0))?;
     if jobs.saturating_add(direct) >= limit {
         return Err(UsageLimitReached.into());
@@ -2365,7 +2730,7 @@ async fn create_job(
             "Kein aktives Pro-Abo, kein Einzel-Credit oder das Pro-Monatskontingent ist erreicht."
                 .to_owned()
         } else {
-            "Das kostenlose Monatslimit von 3 Dokumenten ist erreicht.".to_owned()
+            "Die einmalige kostenlose Konvertierung wurde bereits genutzt.".to_owned()
         };
         return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS, message));
     }
@@ -2518,6 +2883,7 @@ async fn process_job(
     let worker_id = id.clone();
     let record =
         task::spawn_blocking(move || load_job_for_worker(&worker_state, &worker_id)).await??;
+    let free_trial_email = (record.billing_tier == "free").then(|| record.email.clone());
     let input = state.data_dir.join("jobs").join(&id).join("input.pdf");
     let output = state.data_dir.join("jobs").join(&id).join("output.x83");
     let priced_output = state.data_dir.join("jobs").join(&id).join("output.x84");
@@ -2589,6 +2955,9 @@ async fn process_job(
         set_job_emailed_with_warnings(&state, &id, state.diagnostic_retention_days)?;
     } else {
         set_job_status(&state, &id, "ready")?;
+    }
+    if let Some(email) = free_trial_email {
+        mark_free_trial_used(&state, &email)?;
     }
     Ok(())
 }
@@ -2682,6 +3051,7 @@ fn init_database(state: &AppState) -> Result<()> {
            email TEXT PRIMARY KEY,
            stripe_customer_id TEXT NOT NULL DEFAULT '',
            stripe_subscription_id TEXT NOT NULL DEFAULT '',
+           subscription_interval TEXT NOT NULL DEFAULT '',
            pro_active INTEGER NOT NULL DEFAULT 0,
            single_credits INTEGER NOT NULL DEFAULT 0,
            updated_at TEXT NOT NULL,
@@ -2716,6 +3086,10 @@ fn init_database(state: &AppState) -> Result<()> {
            id TEXT PRIMARY KEY, email TEXT NOT NULL, direction TEXT NOT NULL,
            billing_tier TEXT NOT NULL, created_at TEXT NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS free_trials (
+           identity_hash TEXT PRIMARY KEY,
+           used_at TEXT NOT NULL
+         );
          CREATE TABLE IF NOT EXISTS reviews (
            job_id TEXT PRIMARY KEY, email TEXT NOT NULL, rating INTEGER NOT NULL,
            text TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
@@ -2748,6 +3122,8 @@ fn init_database(state: &AppState) -> Result<()> {
         "TEXT",
     )?;
     for (column, definition) in [
+        ("password_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("subscription_interval", "TEXT NOT NULL DEFAULT ''"),
         ("billing_name", "TEXT NOT NULL DEFAULT ''"),
         ("billing_company", "TEXT NOT NULL DEFAULT ''"),
         ("billing_street", "TEXT NOT NULL DEFAULT ''"),
@@ -2757,6 +3133,21 @@ fn init_database(state: &AppState) -> Result<()> {
     ] {
         ensure_table_column(&connection, "billing_accounts", column, definition)?;
     }
+    connection.execute(
+        "UPDATE billing_accounts
+         SET subscription_interval = COALESCE((
+           SELECT CASE
+             WHEN purchases.offer = 'pro_yearly' THEN 'yearly'
+             WHEN purchases.offer IN ('pro', 'pro_monthly') THEN 'monthly'
+             ELSE '' END
+           FROM purchases
+           WHERE purchases.email = billing_accounts.email
+             AND purchases.offer IN ('pro', 'pro_monthly', 'pro_yearly')
+           ORDER BY purchases.created_at DESC LIMIT 1
+         ), subscription_interval)
+         WHERE subscription_interval = ''",
+        [],
+    )?;
     ensure_table_column(
         &connection,
         "reviews",
@@ -2853,20 +3244,27 @@ fn reserve_job(
             _ => return Ok(false),
         }
     } else {
-        let jobs_this_month: u32 = transaction.query_row(
+        let identity_hash = free_trial_identity(&state.free_trial_hash_secret, &form.email);
+        let already_used: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM free_trials WHERE identity_hash=?1)",
+            [identity_hash],
+            |row| row.get(0),
+        )?;
+        if already_used {
+            return Ok(false);
+        }
+        let free_jobs: u32 = transaction.query_row(
             "SELECT COUNT(*) FROM jobs
-             WHERE email = ?1 AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')
-               AND billing_tier = 'free' AND status != 'failed'",
+             WHERE email = ?1 AND billing_tier = 'free' AND status != 'failed'",
             [&form.email],
             |row| row.get(0),
         )?;
-        let direct_this_month: u32 = transaction.query_row(
-            "SELECT COUNT(*) FROM conversion_usage WHERE email=?1 AND billing_tier='free'
-             AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')",
+        let free_direct: u32 = transaction.query_row(
+            "SELECT COUNT(*) FROM conversion_usage WHERE email=?1 AND billing_tier='free'",
             [&form.email],
             |row| row.get(0),
         )?;
-        if jobs_this_month.saturating_add(direct_this_month) >= 3 {
+        if free_jobs.saturating_add(free_direct) >= FREE_LIFETIME_LIMIT {
             return Ok(false);
         }
         "free"
@@ -3203,24 +3601,46 @@ fn issue_billing_access_email(state: &AppState, notice: &PurchaseNotice) -> Resu
         .stripe
         .as_ref()
         .context("PUBLIC_BASE_URL ist nicht konfiguriert")?;
-    let raw_token = Uuid::new_v4().simple().to_string();
-    let token_hash = hash_token(&raw_token);
-    let expires_at = (Utc::now() + ChronoDuration::hours(24)).to_rfc3339();
     let connection = Connection::open(&state.db_path)?;
-    connection.execute(
-        "INSERT INTO billing_access_tokens (token_hash, email, expires_at, created_at, redirect_path)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            token_hash,
-            notice.email,
-            expires_at,
-            Utc::now().to_rfc3339(),
-            if notice.offer == "account" { "/konto.html" } else { "/" }
-        ],
-    )?;
-    let link = format!("{}/billing/access/{}", stripe.public_base_url, raw_token);
+    let is_yearly = notice.offer == "pro_yearly";
+    let (link, access_text) = if is_yearly {
+        (
+            format!("{}/konto.html", stripe.public_base_url),
+            "Melden Sie sich mit Ihrer E-Mail-Adresse und dem beim Kauf festgelegten Passwort an."
+                .to_owned(),
+        )
+    } else {
+        let raw_token = Uuid::new_v4().simple().to_string();
+        let token_hash = hash_token(&raw_token);
+        let valid_days = if matches!(notice.offer.as_str(), "pro" | "pro_monthly") {
+            30
+        } else {
+            1
+        };
+        let expires_at = (Utc::now() + ChronoDuration::days(valid_days)).to_rfc3339();
+        connection.execute(
+            "INSERT INTO billing_access_tokens (token_hash, email, expires_at, created_at, redirect_path)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                token_hash,
+                notice.email,
+                expires_at,
+                Utc::now().to_rfc3339(),
+                if notice.offer == "account" { "/konto.html" } else { "/" }
+            ],
+        )?;
+        (
+            format!("{}/billing/access/{}", stripe.public_base_url, raw_token),
+            if valid_days == 30 {
+                "Dieser persönliche Login-Link ist 30 Tage gültig.".to_owned()
+            } else {
+                "Dieser persönliche Login-Link ist 24 Stunden gültig.".to_owned()
+            },
+        )
+    };
     let product = match notice.offer.as_str() {
-        "pro" => "GAEB Pro",
+        "pro" | "pro_monthly" => "GAEB Pro Monatsabo",
+        "pro_yearly" => "GAEB Pro Jahresabo",
         "single" => "eine Einzelkonvertierung",
         _ => "Ihr GAEB-Konto",
     };
@@ -3231,8 +3651,8 @@ fn issue_billing_access_email(state: &AppState, notice: &PurchaseNotice) -> Resu
     };
     let body = format!(
         "Guten Tag,\n\n{introduction}\n\n\
-         Öffnen Sie innerhalb von 24 Stunden diesen persönlichen Zugangslink:\n{link}\n\n\
-         Anschließend ist Ihr gekauftes Kontingent in diesem Browser freigeschaltet.\n\n\
+         {access_text}\n{link}\n\n\
+         Anschließend ist Ihr Konto in diesem Browser freigeschaltet.\n\n\
          Falls Sie den Kauf nicht durchgeführt haben, ignorieren Sie diese Nachricht.\n"
     );
     let message = Message::builder()
@@ -3323,6 +3743,34 @@ fn activate_access_token(db_path: &Path, token_hash: &str, session_hash: &str) -
     Ok(redirect_path)
 }
 
+fn create_billing_session(db_path: &Path, email: &str) -> Result<String> {
+    let raw_session = Uuid::new_v4().simple().to_string();
+    let session_hash = hash_token(&raw_session);
+    let connection = Connection::open(db_path)?;
+    connection.execute(
+        "INSERT INTO billing_sessions (session_hash, email, expires_at, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            session_hash,
+            email,
+            (Utc::now() + ChronoDuration::days(30)).to_rfc3339(),
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(raw_session)
+}
+
+fn billing_session_cookie(state: &AppState, raw_session: &str) -> String {
+    let secure = state
+        .stripe
+        .as_ref()
+        .is_some_and(|stripe| stripe.public_base_url.starts_with("https://"));
+    format!(
+        "gaeb_session={raw_session}; Path=/; Max-Age=2592000; HttpOnly; {}SameSite=Lax",
+        if secure { "Secure; " } else { "" }
+    )
+}
+
 fn billing_access_from_headers(
     state: &AppState,
     headers: &HeaderMap,
@@ -3356,6 +3804,29 @@ fn hash_token(value: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn free_trial_identity(secret: &str, email: &str) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
+    mac.update(email.trim().to_lowercase().as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn mark_free_trial_used(state: &AppState, email: &str) -> Result<()> {
+    let connection = Connection::open(&state.db_path)?;
+    connection.execute(
+        "INSERT OR IGNORE INTO free_trials(identity_hash,used_at) VALUES(?1,?2)",
+        params![
+            free_trial_identity(&state.free_trial_hash_secret, email),
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
 }
 
 async fn cleanup_expired_jobs(state: &AppState) -> Result<()> {
@@ -3474,13 +3945,6 @@ fn env_i64(name: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
-fn env_u32(name: &str, default: u32) -> u32 {
-    env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
-}
-
 fn env_bool(name: &str, default: bool) -> bool {
     env::var(name)
         .ok()
@@ -3494,8 +3958,6 @@ fn env_bool(name: &str, default: bool) -> bool {
 
 fn offer_config() -> OfferConfig {
     OfferConfig {
-        single_net_cents: env_u32("SINGLE_NET_CENTS", 990),
-        pro_net_cents: env_u32("PRO_NET_CENTS", 1900),
         banner: env::var("OFFER_BANNER_TEXT")
             .ok()
             .map(|v| v.trim().chars().take(180).collect::<String>())
@@ -3513,19 +3975,93 @@ fn valid_email(value: &str) -> bool {
         })
 }
 
+fn validate_new_password(password: &str, confirmation: &str) -> Result<(), ApiError> {
+    if password.chars().count() < 12 || password.len() > 1024 {
+        return Err(ApiError::bad_request(
+            "Das Passwort muss mindestens 12 Zeichen lang sein.",
+        ));
+    }
+    if password != confirmation {
+        return Err(ApiError::bad_request(
+            "Die Passwortbestätigung stimmt nicht überein.",
+        ));
+    }
+    Ok(())
+}
+
+fn hash_password(password: &str) -> Result<String, ApiError> {
+    let salt =
+        SaltString::encode_b64(Uuid::new_v4().as_bytes()).map_err(|_| ApiError::internal())?;
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|_| ApiError::internal())
+}
+
+fn verify_password(password: &str, encoded: &str) -> bool {
+    PasswordHash::new(encoded).ok().is_some_and(|hash| {
+        Argon2::default()
+            .verify_password(password.as_bytes(), &hash)
+            .is_ok()
+    })
+}
+
+fn prepare_yearly_account(db_path: &Path, email: &str, password: &str) -> Result<(), ApiError> {
+    validate_new_password(password, password)?;
+    let connection = Connection::open(db_path).map_err(|_| ApiError::internal())?;
+    let existing_hash: Option<String> = connection
+        .query_row(
+            "SELECT password_hash FROM billing_accounts WHERE email=?1",
+            [email],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| ApiError::internal())?;
+    if let Some(existing_hash) = existing_hash.filter(|hash| !hash.is_empty()) {
+        if !verify_password(password, &existing_hash) {
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "Für diese E-Mail-Adresse besteht bereits ein Konto. Bitte das vorhandene Passwort verwenden.",
+            ));
+        }
+        return Ok(());
+    }
+    let password_hash = hash_password(password)?;
+    connection
+        .execute(
+            "INSERT INTO billing_accounts (email, password_hash, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash, updated_at=excluded.updated_at",
+            params![email, password_hash, Utc::now().to_rfc3339()],
+        )
+        .map_err(|_| ApiError::internal())?;
+    Ok(())
+}
+
+fn is_pro_offer(offer: &str) -> bool {
+    matches!(offer, "pro" | "pro_monthly" | "pro_yearly")
+}
+
 fn stripe_config() -> Option<StripeConfig> {
     let secret_key = required_env("STRIPE_SECRET_KEY")?;
     let webhook_secret = required_env("STRIPE_WEBHOOK_SECRET")?;
     let single_price_id = required_env("STRIPE_SINGLE_PRICE_ID");
     let pro_price_id = required_env("STRIPE_PRO_PRICE_ID")?;
+    let pro_yearly_price_id = required_env("STRIPE_PRO_YEARLY_PRICE_ID");
     let public_base_url = required_env("PUBLIC_BASE_URL")?;
+    let local_test_url = secret_key.starts_with("sk_test_")
+        && (public_base_url.starts_with("http://localhost:")
+            || public_base_url.starts_with("http://127.0.0.1:"));
     if !secret_key.starts_with("sk_")
         || !webhook_secret.starts_with("whsec_")
         || single_price_id
             .as_ref()
             .is_some_and(|price_id| !price_id.starts_with("price_"))
         || !pro_price_id.starts_with("price_")
-        || !public_base_url.starts_with("https://")
+        || pro_yearly_price_id
+            .as_ref()
+            .is_some_and(|price_id| !price_id.starts_with("price_"))
+        || (!public_base_url.starts_with("https://") && !local_test_url)
     {
         error!("Stripe-Konfiguration ist unvollständig oder ungültig; Checkout bleibt deaktiviert");
         return None;
@@ -3535,6 +4071,7 @@ fn stripe_config() -> Option<StripeConfig> {
         webhook_secret,
         single_price_id,
         pro_price_id,
+        pro_yearly_price_id,
         public_base_url: public_base_url.trim_end_matches('/').to_owned(),
     })
 }
@@ -3600,6 +4137,20 @@ fn tracking_config() -> PublicTrackingConfig {
                         character.is_ascii_uppercase()
                             || character.is_ascii_digit()
                             || character == '-'
+                    })
+            }),
+        google_ads_purchase_send_to: env::var("GOOGLE_ADS_PURCHASE_SEND_TO")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| {
+                let Some((conversion_id, label)) = value.split_once('/') else {
+                    return false;
+                };
+                conversion_id.starts_with("AW-")
+                    && !label.is_empty()
+                    && value.len() <= 96
+                    && value.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '/')
                     })
             }),
         meta_pixel_id: env::var("META_PIXEL_ID")
@@ -3697,9 +4248,10 @@ mod tests {
 
     use super::{
         account_access_email_allowed, account_logout, convert_integration_file,
-        extract_imprint_sections, hash_token, init_database, mask_profanity, output_filename,
-        record_and_apply_stripe_event, reserve_conversion_usage, supported_gaeb_filename,
-        verify_stripe_signature, AppState,
+        extract_imprint_sections, hash_password, hash_token, init_database, mark_free_trial_used,
+        mask_profanity, output_filename, record_and_apply_stripe_event, reserve_conversion_usage,
+        supported_gaeb_filename, validate_new_password, verify_password, verify_stripe_signature,
+        AppState, FREE_LIFETIME_LIMIT,
     };
 
     #[test]
@@ -3813,6 +4365,23 @@ mod tests {
     }
 
     #[test]
+    fn password_hash_is_salted_and_verifiable() {
+        let password = "Ein-sicheres-Testpasswort-2026";
+        let first = hash_password(password).ok().unwrap();
+        let second = hash_password(password).ok().unwrap();
+        assert_ne!(first, second);
+        assert!(verify_password(password, &first));
+        assert!(!verify_password("falsches-passwort", &first));
+    }
+
+    #[test]
+    fn new_password_requires_length_and_confirmation() {
+        assert!(validate_new_password("zu-kurz", "zu-kurz").is_err());
+        assert!(validate_new_password("mindestens-zwoelf", "abweichend-123").is_err());
+        assert!(validate_new_password("mindestens-zwoelf", "mindestens-zwoelf").is_ok());
+    }
+
+    #[test]
     fn database_migration_adds_consent_columns_to_existing_jobs() {
         let directory = tempdir().unwrap();
         let db_path = directory.path().join("gaeb-web.sqlite3");
@@ -3848,13 +4417,10 @@ mod tests {
             imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tracking: Default::default(),
             stripe: None,
-            offer: super::OfferConfig {
-                single_net_cents: 990,
-                pro_net_cents: 1900,
-                banner: None,
-            },
+            offer: super::OfferConfig { banner: None },
             admin_token_hash: None,
             integration_api_key_hashes: Vec::new(),
+            free_trial_hash_secret: "test-secret".into(),
         });
         init_database(&state).unwrap();
 
@@ -3887,13 +4453,10 @@ mod tests {
             imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tracking: Default::default(),
             stripe: None,
-            offer: super::OfferConfig {
-                single_net_cents: 990,
-                pro_net_cents: 1900,
-                banner: None,
-            },
+            offer: super::OfferConfig { banner: None },
             admin_token_hash: None,
             integration_api_key_hashes: Vec::new(),
+            free_trial_hash_secret: "test-secret".into(),
         });
         init_database(&state).unwrap();
         let payload = r#"{
@@ -3951,13 +4514,10 @@ mod tests {
             imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tracking: Default::default(),
             stripe: None,
-            offer: super::OfferConfig {
-                single_net_cents: 990,
-                pro_net_cents: 1900,
-                banner: None,
-            },
+            offer: super::OfferConfig { banner: None },
             admin_token_hash: None,
             integration_api_key_hashes: Vec::new(),
+            free_trial_hash_secret: "test-secret".into(),
         });
         init_database(&state).unwrap();
         let raw_session = "session-secret";
@@ -4008,13 +4568,10 @@ mod tests {
             imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tracking: Default::default(),
             stripe: None,
-            offer: super::OfferConfig {
-                single_net_cents: 990,
-                pro_net_cents: 1900,
-                banner: None,
-            },
+            offer: super::OfferConfig { banner: None },
             admin_token_hash: None,
             integration_api_key_hashes: Vec::new(),
+            free_trial_hash_secret: "test-secret".into(),
         });
         init_database(&state).unwrap();
         let connection = Connection::open(db_path).unwrap();
@@ -4037,7 +4594,7 @@ mod tests {
     }
 
     #[test]
-    fn free_monthly_limit_counts_both_conversion_directions() {
+    fn free_lifetime_limit_counts_both_directions_but_ignores_failures() {
         let directory = tempdir().unwrap();
         let db_path = directory.path().join("gaeb-web.sqlite3");
         let state = Arc::new(AppState {
@@ -4052,48 +4609,67 @@ mod tests {
             imprint_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tracking: Default::default(),
             stripe: None,
-            offer: super::OfferConfig {
-                single_net_cents: 990,
-                pro_net_cents: 1900,
-                banner: None,
-            },
+            offer: super::OfferConfig { banner: None },
             admin_token_hash: None,
             integration_api_key_hashes: Vec::new(),
+            free_trial_hash_secret: "test-secret".into(),
         });
         init_database(&state).unwrap();
         let connection = Connection::open(&db_path).unwrap();
+        let old = (Utc::now() - ChronoDuration::days(60)).to_rfc3339();
         let now = Utc::now().to_rfc3339();
         connection.execute(
             "INSERT INTO jobs(id,token,email,contact_name,company,phone,filename,status,created_at,expires_at,billing_tier)
              VALUES('job-one','token','mix@example.de','Test','','','test.pdf','ready',?1,?2,'free')",
-            [&now, &now],
+            [&old, &now],
         ).unwrap();
         drop(connection);
-        reserve_conversion_usage(
+        assert!(reserve_conversion_usage(
             &db_path,
+            "test-secret",
             "usage-one",
             "mix@example.de",
             "gaeb_to_pdf",
             "free",
-            3,
+            FREE_LIFETIME_LIMIT,
         )
-        .unwrap();
+        .is_err());
+        let connection = Connection::open(&db_path).unwrap();
+        connection
+            .execute("UPDATE jobs SET status='failed' WHERE id='job-one'", [])
+            .unwrap();
+        drop(connection);
         reserve_conversion_usage(
             &db_path,
+            "test-secret",
+            "usage-one",
+            "mix@example.de",
+            "gaeb_to_pdf",
+            "free",
+            FREE_LIFETIME_LIMIT,
+        )
+        .unwrap();
+        mark_free_trial_used(&state, "mix@example.de").unwrap();
+        let connection = Connection::open(&db_path).unwrap();
+        connection
+            .execute("DELETE FROM conversion_usage", [])
+            .unwrap();
+        connection.execute("DELETE FROM jobs", []).unwrap();
+        let stored_identity: String = connection
+            .query_row("SELECT identity_hash FROM free_trials", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_ne!(stored_identity, "mix@example.de");
+        drop(connection);
+        assert!(reserve_conversion_usage(
+            &db_path,
+            "test-secret",
             "usage-two",
             "mix@example.de",
             "gaeb_to_pdf",
             "free",
-            3,
-        )
-        .unwrap();
-        assert!(reserve_conversion_usage(
-            &db_path,
-            "usage-three",
-            "mix@example.de",
-            "gaeb_to_pdf",
-            "free",
-            3
+            FREE_LIFETIME_LIMIT
         )
         .is_err());
     }

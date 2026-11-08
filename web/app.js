@@ -19,6 +19,7 @@ const preflightDetail = document.querySelector("#preflight-detail");
 const preflightPercent = document.querySelector("#preflight-percent");
 const preflightBar = document.querySelector("#preflight-bar");
 const resetUploadButton = document.querySelector("#reset-upload-button");
+const conversionLimitAlert = document.querySelector("#conversion-limit-alert");
 let activeUploadController = null;
 let preflightTimer = null;
 let pdfUploadLimit = 2 * 1024 * 1024;
@@ -80,11 +81,6 @@ async function initializeBilling() {
     }
     const response = await fetch("/api/billing/config");
     const config = await response.json();
-    const money = (cents) => new Intl.NumberFormat("de-DE", {style:"currency",currency:"EUR"}).format(cents/100);
-    const singlePrice = document.querySelector("#single-price");
-    const proPrice = document.querySelector("#pro-price");
-    if (singlePrice) singlePrice.textContent = money(config.single_net_cents);
-    if (proPrice) proPrice.textContent = money(config.pro_net_cents);
     if (config.offer_banner) { const banner=document.querySelector("#offer-banner"); banner.textContent=config.offer_banner; banner.hidden=false; }
     for (const form of forms) {
       const button = form.querySelector("button");
@@ -120,10 +116,11 @@ async function initializeBilling() {
         const response = await fetch("/api/billing/checkout", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ offer: form.dataset.offer, email: new FormData(form).get("email") }),
+          body: JSON.stringify({ offer: form.dataset.offer, email: new FormData(form).get("email"), password: new FormData(form).get("password") || null }),
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Checkout konnte nicht geöffnet werden.");
+        window.gaebTrackEvent?.("checkout_started", { offer: form.dataset.offer, source: "pdf_to_gaeb" });
         window.location.assign(data.url);
       } catch (error) {
         note.textContent = error.message;
@@ -303,6 +300,9 @@ async function pollJob(id, token) {
       return;
     }
     if (data.status === "ready") {
+      if (!document.body.classList.contains("billing-active")) {
+        window.gaebTrackEvent?.("free_conversion_success", { direction: "pdf_to_gaeb" });
+      }
       spinner.className = "spinner is-done";
       jobKicker.textContent = "Konvertierung abgeschlossen";
       const options = data.download_options || [];
@@ -355,6 +355,14 @@ async function pollJob(id, token) {
 }
 
 function showError(message) {
+  const freeLimitReached = message.includes("einmalige kostenlose Konvertierung");
+  conversionLimitAlert.hidden = !freeLimitReached;
+  if (freeLimitReached) {
+    fileMeta.textContent = "Kostenloser Test bereits verwendet";
+    fileMeta.style.color = "var(--error)";
+    conversionLimitAlert.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
   fileMeta.textContent = message;
   fileMeta.style.color = "var(--error)";
 }

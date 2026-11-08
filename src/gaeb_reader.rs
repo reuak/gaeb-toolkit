@@ -331,6 +331,7 @@ struct PdfRenderer {
     bold: IndirectFontRef,
     y: f32,
     page_number: usize,
+    show_prices: bool,
 }
 
 impl PdfRenderer {
@@ -349,10 +350,14 @@ impl PdfRenderer {
             bold,
             y: 278.0,
             page_number: 1,
+            show_prices: false,
         }
     }
 
     fn write_document(&mut self, document: &GaebDocument) -> Result<()> {
+        self.show_prices = document.rows.iter().any(|row| {
+            matches!(row, GaebRow::Item(item) if item.unit_price.is_some() || item.total_price.is_some())
+        });
         self.text(15.0, self.y, 17.0, &self.bold, "GAEB-Leistungsverzeichnis");
         self.y -= 8.0;
         self.text(
@@ -400,17 +405,24 @@ impl PdfRenderer {
         for row in &document.rows {
             match row {
                 GaebRow::Category { oz, title, level } => {
-                    self.ensure_space(10.0);
-                    self.y -= 2.0;
-                    let indent = (*level as f32 - 1.0).max(0.0) * 4.0;
-                    self.text(
-                        15.0 + indent,
-                        self.y,
-                        10.5,
-                        &self.bold,
-                        &printable(&format!("{oz}  {title}")),
+                    let indent = (*level as f32 - 1.0).max(0.0) * 5.0;
+                    let size = match level {
+                        0 | 1 => 12.0,
+                        2 => 10.5,
+                        _ => 9.5,
+                    };
+                    let lines = wrap(
+                        &format!("{oz}  {title}"),
+                        78usize.saturating_sub(*level * 4),
                     );
-                    self.y -= 7.0;
+                    let height = lines.len().max(1) as f32 * 5.5 + 5.0;
+                    self.ensure_space(height);
+                    self.y -= if *level <= 1 { 4.0 } else { 2.0 };
+                    for line in lines {
+                        self.text(15.0 + indent, self.y, size, &self.bold, &printable(&line));
+                        self.y -= 5.5;
+                    }
+                    self.y -= if *level <= 1 { 2.5 } else { 1.0 };
                 }
                 GaebRow::Item(item) => self.write_item(item),
             }
@@ -422,9 +434,17 @@ impl PdfRenderer {
     fn table_header(&mut self) {
         self.text(15.0, self.y, 8.0, &self.bold, "OZ");
         self.text(42.0, self.y, 8.0, &self.bold, "Leistungsbeschreibung");
-        self.text(151.0, self.y, 8.0, &self.bold, "Menge / EH");
-        self.text(176.0, self.y, 8.0, &self.bold, "Betrag");
-        self.y -= 7.0;
+        self.text(
+            if self.show_prices { 151.0 } else { 166.0 },
+            self.y,
+            8.0,
+            &self.bold,
+            "Menge / EH",
+        );
+        if self.show_prices {
+            self.text(176.0, self.y, 8.0, &self.bold, "Betrag");
+        }
+        self.y -= 8.0;
     }
 
     fn write_item(&mut self, item: &GaebItem) {
@@ -433,8 +453,8 @@ impl PdfRenderer {
         } else {
             &item.short_text
         };
-        let short_lines = wrap(short, 72);
-        let long_lines = wrap(&item.long_text, 88);
+        let short_lines = wrap(short, if self.show_prices { 67 } else { 78 });
+        let long_lines = wrap(&item.long_text, if self.show_prices { 82 } else { 96 });
         let item_height =
             short_lines.len().max(1) as f32 * 4.5 + long_lines.len() as f32 * 4.2 + 5.0;
         if item_height < 245.0 {
@@ -455,7 +475,7 @@ impl PdfRenderer {
             .map(|value| value.normalize().to_string())
             .unwrap_or_default();
         self.text(
-            151.0,
+            if self.show_prices { 151.0 } else { 166.0 },
             self.y,
             8.0,
             &self.regular,
@@ -466,7 +486,9 @@ impl PdfRenderer {
             .or(item.unit_price)
             .map(|value| format!("{} {}", value.normalize(), "EUR"))
             .unwrap_or_default();
-        self.text(176.0, self.y, 8.0, &self.regular, &amount);
+        if self.show_prices {
+            self.text(176.0, self.y, 8.0, &self.regular, &amount);
+        }
         self.y -= short_lines.len().max(1) as f32 * 4.5 + 2.0;
 
         for line in long_lines {
@@ -474,7 +496,7 @@ impl PdfRenderer {
             self.text(42.0, self.y, 7.8, &self.regular, &printable(&line));
             self.y -= 4.2;
         }
-        self.y -= 3.0;
+        self.y -= 4.5;
     }
 
     fn ensure_space(&mut self, needed: f32) {
