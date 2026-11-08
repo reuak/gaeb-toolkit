@@ -4049,10 +4049,13 @@ fn stripe_config() -> Option<StripeConfig> {
     let pro_price_id = required_env("STRIPE_PRO_PRICE_ID")?;
     let pro_yearly_price_id = required_env("STRIPE_PRO_YEARLY_PRICE_ID");
     let public_base_url = required_env("PUBLIC_BASE_URL")?;
-    let local_test_url = secret_key.starts_with("sk_test_")
+    let supported_secret_key = secret_key.starts_with("sk_") || secret_key.starts_with("rk_");
+    let test_secret_key =
+        secret_key.starts_with("sk_test_") || secret_key.starts_with("rk_test_");
+    let local_test_url = test_secret_key
         && (public_base_url.starts_with("http://localhost:")
             || public_base_url.starts_with("http://127.0.0.1:"));
-    if !secret_key.starts_with("sk_")
+    if !supported_secret_key
         || !webhook_secret.starts_with("whsec_")
         || single_price_id
             .as_ref()
