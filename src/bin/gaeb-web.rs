@@ -342,6 +342,9 @@ struct DocumentResponse {
     created_at: String,
     expires_at: String,
     download_url: Option<String>,
+    source_download_url: Option<String>,
+    x84_download_url: Option<String>,
+    report_download_url: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -476,6 +479,10 @@ async fn main() -> Result<()> {
         .route(
             "/api/account/documents/{id}/download",
             get(download_account_document),
+        )
+        .route(
+            "/api/account/documents/{id}/download/{format}",
+            get(download_account_document_format),
         )
         .route("/api/reviews/eligibility", get(review_eligibility))
         .route("/api/reviews", post(create_review))
@@ -1434,7 +1441,7 @@ async fn account_overview(
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|_| ApiError::internal())?
     };
-    let documents = {
+    let mut documents = {
         let mut stmt = connection
             .prepare(
                 "SELECT id, filename, status, file_size_bytes, created_at, expires_at FROM jobs
@@ -1448,6 +1455,9 @@ async fn account_overview(
                 Ok(DocumentResponse {
                     download_url: matches!(status.as_str(), "ready" | "ready_with_warnings")
                         .then(|| format!("/api/account/documents/{id}/download")),
+                    source_download_url: None,
+                    x84_download_url: None,
+                    report_download_url: None,
                     id,
                     filename: r.get(1)?,
                     status,
@@ -1460,6 +1470,44 @@ async fn account_overview(
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|_| ApiError::internal())?
     };
+    for document in &mut documents {
+        let job_dir = state.data_dir.join("jobs").join(&document.id);
+        let mut stored_size = 0_i64;
+        for stored_file in [
+            "input.pdf",
+            "output.x83",
+            "output.x84",
+            "fehlerprotokoll.txt",
+        ] {
+            if let Ok(metadata) = std::fs::metadata(job_dir.join(stored_file)) {
+                stored_size = stored_size.saturating_add(metadata.len() as i64);
+            }
+        }
+        document.size_bytes = stored_size.max(document.size_bytes);
+        if job_dir.join("input.pdf").is_file() {
+            document.source_download_url = Some(format!(
+                "/api/account/documents/{}/download/source",
+                document.id
+            ));
+        }
+        let downloadable = matches!(document.status.as_str(), "ready" | "ready_with_warnings");
+        if !downloadable || !job_dir.join("output.x83").is_file() {
+            document.download_url = None;
+        }
+        if downloadable && job_dir.join("output.x84").is_file() {
+            document.x84_download_url = Some(format!(
+                "/api/account/documents/{}/download/x84",
+                document.id
+            ));
+        }
+        if document.status == "ready_with_warnings" && job_dir.join("fehlerprotokoll.txt").is_file()
+        {
+            document.report_download_url = Some(format!(
+                "/api/account/documents/{}/download/report",
+                document.id
+            ));
+        }
+    }
     let storage_used_bytes = documents
         .iter()
         .filter(|d| d.status != "failed")
@@ -1620,6 +1668,56 @@ async fn download_account_document(
         .map_err(|_| ApiError::internal())?,
     );
     Ok((headers, Body::from(bytes)).into_response())
+}
+
+async fn download_account_document_format(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath((id, format)): AxumPath<(String, String)>,
+) -> Result<Response, ApiError> {
+    let access = billing_access_from_headers(&state, &headers)
+        .map_err(|_| ApiError::internal())?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "Bitte zuerst anmelden."))?;
+    let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let (filename, status): (String, String) = connection
+        .query_row(
+            "SELECT filename, status FROM jobs
+             WHERE id=?1 AND email=?2 AND billing_tier!='free'",
+            params![id, access.email],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| ApiError::not_found("Dokument nicht gefunden."))?;
+    let downloadable = matches!(status.as_str(), "ready" | "ready_with_warnings");
+    let (stored_name, download_name, content_type) = match format.as_str() {
+        "source" => ("input.pdf", safe_filename(&filename), "application/pdf"),
+        "x83" if downloadable => (
+            "output.x83",
+            output_filename(&filename),
+            "application/xml; charset=utf-8",
+        ),
+        "x84" if downloadable => (
+            "output.x84",
+            output_filename_for(&filename, "x84"),
+            "application/xml; charset=utf-8",
+        ),
+        "report" if status == "ready_with_warnings" => (
+            "fehlerprotokoll.txt",
+            output_filename_for(&filename, "txt"),
+            "text/plain; charset=utf-8",
+        ),
+        _ => return Err(ApiError::not_found("Dateiformat nicht verfügbar.")),
+    };
+    let bytes = fs::read(state.data_dir.join("jobs").join(&id).join(stored_name))
+        .await
+        .map_err(|_| ApiError::not_found("Datei nicht gefunden."))?;
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response_headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{download_name}\""))
+            .map_err(|_| ApiError::internal())?,
+    );
+    Ok((response_headers, Body::from(bytes)).into_response())
 }
 
 async fn review_eligibility(

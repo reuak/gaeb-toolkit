@@ -695,6 +695,8 @@ body.billing-active .trust-row span:first-child {
 .login-form { max-width:520px; display:grid; gap:14px; }.login-form label { display:grid; gap:6px; }
 .account-row { display:flex; justify-content:space-between; align-items:center; gap:18px; padding:16px 0; border-bottom:1px solid var(--line); }
 .account-row strong,.account-row span { display:block; }.text-button { border:0; background:none; color:#9e3e18; cursor:pointer; }
+.document-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
+.document-actions a { color:var(--green); font-size:13px; font-weight:750; white-space:nowrap; }
 @media(max-width:800px){.main-nav{width:100%;justify-content:flex-start}.site-header{align-items:flex-start;flex-direction:column;gap:14px}.tool-page{grid-template-columns:1fr}.account-grid{grid-template-columns:1fr}.next-steps li{grid-template-columns:1fr;gap:5px}.account-row{align-items:flex-start}}
 .paid-preview p:last-child { margin: 14px 0 0; color: #b9c5c0; line-height: 1.6; }
 .coming-soon { flex: 0 0 auto; padding: 10px 13px; border: 1px solid #456158; border-radius: 99px; color: var(--lime); font-size: 11px; font-weight: 750; }

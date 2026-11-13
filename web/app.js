@@ -59,6 +59,7 @@ function applyPaidAppearance(status) {
   document.querySelector("#trust-retention").textContent = isPro
     ? "2 GB Dokumentenspeicher"
     : "Download für 7 Tage";
+  document.querySelector("#trust-ocr").hidden = !isPro;
   document.querySelector("#convert-form .primary-button span").textContent = isPro
     ? "Pro-Konvertierung starten"
     : "Credit einsetzen und konvertieren";
