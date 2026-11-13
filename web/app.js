@@ -357,15 +357,25 @@ async function pollJob(id, token) {
     if (data.status === "ready_with_warnings") {
       spinner.className = "spinner is-done";
       jobKicker.textContent = "Prüfpflichtiger Entwurf erstellt";
-      jobTitle.textContent = "Die vereinfachte X83 ist zum Download bereit.";
-      jobMessage.textContent = data.error || "Bitte prüfen Sie die Datei vor der Weiterverarbeitung fachlich.";
-      progressBar.style.width = "100%";
       const options = data.download_options || [];
       const x83 = options.find((option) => option.format === "x83");
+      const x84 = options.find((option) => option.format === "x84");
       const report = options.find((option) => option.format === "report");
+      jobTitle.textContent = x84
+        ? "Prüfpflichtige X83 und X84 sind zum Download bereit."
+        : "Die prüfpflichtige X83 ist zum Download bereit.";
+      jobMessage.textContent = x84
+        ? "X83 enthält das LV ohne Preise; X84 enthält die erkannten Preise. Bitte prüfen Sie beide Dateien fachlich."
+        : data.error || "Bitte prüfen Sie die Datei vor der Weiterverarbeitung fachlich.";
+      progressBar.style.width = "100%";
       downloadButton.href = x83?.url || data.download_url;
-      downloadButton.textContent = "Prüfpflichtige X83 herunterladen";
+      downloadButton.textContent = "Prüfpflichtige X83 · ohne Preise";
       downloadButton.hidden = false;
+      if (x84) {
+        downloadX84Button.href = x84.url;
+        downloadX84Button.textContent = "Prüfpflichtige X84 · mit Preisen";
+        downloadX84Button.hidden = false;
+      }
       if (report) {
         downloadReportButton.href = report.url;
         downloadReportButton.hidden = false;
@@ -392,6 +402,7 @@ async function pollJob(id, token) {
       showJobError(
         data.error || "Das LV konnte nicht konvertiert werden.",
         data.review_export_available,
+        data.review_export_has_prices,
         id,
         token,
       );
@@ -420,7 +431,7 @@ function showError(message) {
   fileMeta.style.color = "var(--error)";
 }
 
-function showJobError(message, reviewExportAvailable = false, id = null, token = null) {
+function showJobError(message, reviewExportAvailable = false, reviewExportHasPrices = false, id = null, token = null) {
   form.hidden = true;
   jobPanel.hidden = false;
   downloadButton.hidden = true;
@@ -432,6 +443,12 @@ function showJobError(message, reviewExportAvailable = false, id = null, token =
   reviewExportJob = reviewExportAvailable ? { id, token } : null;
   acceptReviewExportButton.hidden = !reviewExportAvailable;
   acceptReviewExportNote.hidden = !reviewExportAvailable;
+  acceptReviewExportButton.textContent = reviewExportHasPrices
+    ? "Prüfpflichtige X83 und X84 freigeben"
+    : "Prüfpflichtige X83 freigeben und herunterladen";
+  acceptReviewExportNote.textContent = reviewExportHasPrices
+    ? "Preise wurden erkannt: X83 wird ohne Preise und X84 regelkonform mit Preisen bereitgestellt. Die Freigabe zählt als eine Pro-Konvertierung."
+    : "Die Freigabe zählt als eine Pro-Konvertierung. Die X83 muss anschließend fachlich geprüft werden.";
   spinner.className = "spinner is-error";
   jobKicker.textContent = reviewExportAvailable ? "Sicherer Export blockiert" : "Konvertierung nicht möglich";
   jobTitle.textContent = reviewExportAvailable

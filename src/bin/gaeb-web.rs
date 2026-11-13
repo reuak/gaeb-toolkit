@@ -129,6 +129,7 @@ struct JobStatusResponse {
     download_url: Option<String>,
     download_options: Vec<DownloadOption>,
     review_export_available: bool,
+    review_export_has_prices: bool,
     expires_at: String,
 }
 
@@ -2906,6 +2907,16 @@ async fn job_status(
         )
         .await
         .unwrap_or(false);
+    let review_export_has_prices = review_export_available
+        && fs::try_exists(
+            state
+                .data_dir
+                .join("jobs")
+                .join(&record.id)
+                .join("output.x84"),
+        )
+        .await
+        .unwrap_or(false);
     let download_url = downloadable.then(|| format!("/download/{}/{}", record.id, record.token));
     let mut download_options = Vec::new();
     if downloadable {
@@ -2942,6 +2953,7 @@ async fn job_status(
         download_url,
         download_options,
         review_export_available,
+        review_export_has_prices,
         expires_at: record.expires_at,
     }))
 }
@@ -3127,31 +3139,43 @@ async fn process_job(
                 );
             }
         }
-        match write_x83(&boq, &processing_output, false) {
-            Ok(()) => {
-                if std::env::var("DOLIBARR_COMPATIBLE_X83").as_deref() != Ok("true") {
-                    inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
-                }
-                apply_provisional_flags(&processing_output, &boq)?;
-                if includes_prices {
-                    write_x84(&boq, &processing_priced_output, false)?;
-                    inject_pdf_pngs(&processing_input, &processing_priced_output, &boq)?;
-                    apply_provisional_flags(&processing_priced_output, &boq)?;
-                }
-                Ok(false)
+        let safe_export = (|| -> Result<()> {
+            write_x83(&boq, &processing_output, false)?;
+            if std::env::var("DOLIBARR_COMPATIBLE_X83").as_deref() != Ok("true") {
+                inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
             }
+            apply_provisional_flags(&processing_output, &boq)?;
+            if includes_prices {
+                write_x84(&boq, &processing_priced_output, false)?;
+                inject_pdf_pngs(&processing_input, &processing_priced_output, &boq)?;
+                apply_provisional_flags(&processing_priced_output, &boq)?;
+            }
+            Ok(())
+        })();
+        match safe_export {
+            Ok(()) => Ok(false),
             Err(error) => {
                 write_x83(&boq, &processing_output, true)?;
                 if std::env::var("DOLIBARR_COMPATIBLE_X83").as_deref() != Ok("true") {
                     inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
                 }
                 apply_provisional_flags(&processing_output, &boq)?;
+                if includes_prices {
+                    write_x84(&boq, &processing_priced_output, true)?;
+                    inject_pdf_pngs(&processing_input, &processing_priced_output, &boq)?;
+                    apply_provisional_flags(&processing_priced_output, &boq)?;
+                }
                 let report_text = format!(
-                    "PRÜFPFLICHTIGER X83-ENTWURF\n\
-                     ===========================\n\n\
+                    "PRÜFPFLICHTIGER GAEB-ENTWURF\n\
+                     ============================\n\n\
                      Der sichere Export wurde wegen folgender Konflikte blockiert.\n\
-                     Die beigefügte X83 wurde fehlertolerant erzeugt und muss vor jeder\n\
-                     weiteren Verwendung fachlich geprüft werden.\n\n{error}\n"
+                     Die X83 ohne Preise{} wurde fehlertolerant erzeugt und muss vor jeder\n\
+                     weiteren Verwendung fachlich geprüft werden.\n\n{error}\n",
+                    if includes_prices {
+                        " sowie die X84 mit den erkannten Preisen"
+                    } else {
+                        ""
+                    }
                 );
                 std::fs::write(&processing_report, &report_text)?;
                 if !record.email_fallback_consent {
