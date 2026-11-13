@@ -146,6 +146,7 @@ struct ErrorResponse {
 #[derive(Serialize)]
 struct IntegrationApiInfo {
     name: &'static str,
+    tool_version: &'static str,
     version: &'static str,
     max_upload_bytes: usize,
     authentication: &'static str,
@@ -514,7 +515,7 @@ async fn main() -> Result<()> {
     let bind = env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
     let address: SocketAddr = bind.parse().context("BIND ist keine gültige Adresse")?;
     let listener = TcpListener::bind(address).await?;
-    info!(%address, "GAEB web service started");
+    info!(%address, version = env!("CARGO_PKG_VERSION"), "GAEB web service started");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -530,6 +531,7 @@ async fn integration_api_info(
     require_integration_api(&state, &headers)?;
     Ok(Json(IntegrationApiInfo {
         name: "GAEB.hawkvision.de Conversion API",
+        tool_version: env!("CARGO_PKG_VERSION"),
         version: "v1",
         max_upload_bytes: state.paid_max_upload_bytes,
         authentication: "Authorization: Bearer <key> oder X-API-Key: <key>",
