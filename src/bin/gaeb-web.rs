@@ -1439,7 +1439,7 @@ async fn account_overview(
                 let id: String = r.get(0)?;
                 let status: String = r.get(2)?;
                 Ok(DocumentResponse {
-                    download_url: (status == "ready")
+                    download_url: matches!(status.as_str(), "ready" | "ready_with_warnings")
                         .then(|| format!("/api/account/documents/{id}/download")),
                     id,
                     filename: r.get(1)?,
@@ -1591,7 +1591,7 @@ async fn download_account_document(
     let connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
     let filename: String = connection
         .query_row(
-            "SELECT filename FROM jobs WHERE id=?1 AND email=?2 AND status='ready'",
+            "SELECT filename FROM jobs WHERE id=?1 AND email=?2 AND status IN ('ready','ready_with_warnings')",
             params![id, access.email],
             |r| r.get(0),
         )
@@ -2750,7 +2750,7 @@ async fn create_job(
     tokio::spawn(async move {
         if let Err(err) = process_job(worker_state.clone(), worker_id.clone(), preflight).await {
             error!(job_id = %worker_id, error = %err, "conversion failed");
-            let _ = set_job_failed(&worker_state, &worker_id);
+            let _ = set_job_failed(&worker_state, &worker_id, &err.to_string());
         }
     });
 
@@ -2779,10 +2779,10 @@ async fn job_status(
         .map_err(|_| ApiError::internal())?
         .map_err(|_| ApiError::internal())?
         .ok_or_else(|| ApiError::not_found("Auftrag nicht gefunden."))?;
-    let download_url =
-        (record.status == "ready").then(|| format!("/download/{}/{}", record.id, record.token));
+    let downloadable = matches!(record.status.as_str(), "ready" | "ready_with_warnings");
+    let download_url = downloadable.then(|| format!("/download/{}/{}", record.id, record.token));
     let mut download_options = Vec::new();
-    if record.status == "ready" {
+    if downloadable {
         download_options.push(DownloadOption {
             format: "x83",
             label: "X83 – Ausschreibung ohne Preise",
@@ -2798,6 +2798,13 @@ async fn job_status(
                 format: "x84",
                 label: "X84 – Angebot mit Preisen",
                 url: format!("/download/{}/{}/x84", record.id, record.token),
+            });
+        }
+        if record.status == "ready_with_warnings" {
+            download_options.push(DownloadOption {
+                format: "report",
+                label: "Fehlerprotokoll",
+                url: format!("/download/{}/{}/report", record.id, record.token),
             });
         }
     }
@@ -2821,7 +2828,7 @@ async fn download(
         .await
         .map_err(|_| ApiError::internal())?
         .map_err(|_| ApiError::internal())?
-        .filter(|job| job.status == "ready")
+        .filter(|job| matches!(job.status.as_str(), "ready" | "ready_with_warnings"))
         .ok_or_else(|| ApiError::not_found("Download nicht gefunden oder abgelaufen."))?;
     let path = state
         .data_dir
@@ -2854,27 +2861,27 @@ async fn download_format(
         .await
         .map_err(|_| ApiError::internal())?
         .map_err(|_| ApiError::internal())?
-        .filter(|job| job.status == "ready")
+        .filter(|job| matches!(job.status.as_str(), "ready" | "ready_with_warnings"))
         .ok_or_else(|| ApiError::not_found("Download nicht gefunden oder abgelaufen."))?;
-    let extension = match format.to_ascii_lowercase().as_str() {
-        "x83" => "x83",
-        "x84" => "x84",
+    let (stored_name, extension, content_type) = match format.to_ascii_lowercase().as_str() {
+        "x83" => ("output.x83", "x83", "application/xml; charset=utf-8"),
+        "x84" => ("output.x84", "x84", "application/xml; charset=utf-8"),
+        "report" if record.status == "ready_with_warnings" => {
+            ("fehlerprotokoll.txt", "txt", "text/plain; charset=utf-8")
+        }
         _ => return Err(ApiError::not_found("Downloadformat nicht gefunden.")),
     };
     let path = state
         .data_dir
         .join("jobs")
         .join(&record.id)
-        .join(format!("output.{extension}"));
+        .join(stored_name);
     let bytes = fs::read(path)
         .await
         .map_err(|_| ApiError::not_found("Download nicht gefunden oder abgelaufen."))?;
     let filename = output_filename_for(&record.filename, extension);
     let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/xml; charset=utf-8"),
-    );
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
@@ -2907,7 +2914,7 @@ async fn process_job(
     let processing_priced_output = priced_output.clone();
     let processing_report = report.clone();
     let smtp = state.smtp.clone();
-    let emailed_with_warnings = task::spawn_blocking(move || -> Result<bool> {
+    let ready_with_warnings = task::spawn_blocking(move || -> Result<bool> {
         let boq = preflight;
         let includes_prices = has_prices(&boq.roots);
         if record.billing_tier == "free" {
@@ -2945,24 +2952,23 @@ async fn process_job(
                      weiteren Verwendung fachlich geprüft werden.\n\n{error}\n"
                 );
                 std::fs::write(&processing_report, &report_text)?;
-                let smtp = smtp.context(
-                    "E-Mail-Versand ist nicht konfiguriert. Bitte SMTP_* Variablen setzen.",
-                )?;
-                send_fallback_email(
-                    &smtp,
-                    &record,
-                    &processing_input,
-                    &processing_output,
-                    &processing_report,
-                )?;
+                if let Some(smtp) = smtp {
+                    let _ = send_fallback_email(
+                        &smtp,
+                        &record,
+                        &processing_input,
+                        &processing_output,
+                        &processing_report,
+                    );
+                }
                 Ok(true)
             }
             Err(error) => Err(error),
         }
     })
     .await??;
-    if emailed_with_warnings {
-        set_job_emailed_with_warnings(&state, &id, state.diagnostic_retention_days)?;
+    if ready_with_warnings {
+        set_job_ready_with_warnings(&state, &id, state.diagnostic_retention_days)?;
     } else {
         set_job_status(&state, &id, "ready")?;
     }
@@ -3410,13 +3416,13 @@ fn set_job_status(state: &AppState, id: &str, status: &str) -> Result<()> {
     Ok(())
 }
 
-fn set_job_emailed_with_warnings(state: &AppState, id: &str, retention_days: i64) -> Result<()> {
+fn set_job_ready_with_warnings(state: &AppState, id: &str, retention_days: i64) -> Result<()> {
     let connection = Connection::open(&state.db_path)?;
     let expires_at = (Utc::now() + ChronoDuration::days(retention_days)).to_rfc3339();
     connection.execute(
         "UPDATE jobs
-         SET status = 'emailed_with_warnings',
-             error = 'Prüfpflichtiger X83-Entwurf und Fehlerprotokoll wurden per E-Mail versendet.',
+         SET status = 'ready_with_warnings',
+             error = 'Der sichere Export war nicht möglich. Aufgrund Ihrer vorherigen Zustimmung wurde ein vereinfachter, ausdrücklich prüfpflichtiger X83-Entwurf erzeugt. Bitte beachten Sie das Fehlerprotokoll.',
              expires_at = ?1
          WHERE id = ?2",
         params![expires_at, id],
@@ -3424,7 +3430,7 @@ fn set_job_emailed_with_warnings(state: &AppState, id: &str, retention_days: i64
     Ok(())
 }
 
-fn set_job_failed(state: &AppState, id: &str) -> Result<()> {
+fn set_job_failed(state: &AppState, id: &str, technical_error: &str) -> Result<()> {
     let mut connection = Connection::open(&state.db_path)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let refundable_email: Option<String> = transaction
@@ -3434,11 +3440,15 @@ fn set_job_failed(state: &AppState, id: &str) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
+    let detail = technical_error.chars().take(1500).collect::<String>();
+    let user_error = format!(
+        "Der sichere Export wurde abgebrochen: {detail} Aktivieren Sie vor einem neuen Versuch die Option für eine vereinfachte, prüfpflichtige X83-Konvertierung. Eine fehlgeschlagene Konvertierung wird nicht auf das Kontingent angerechnet."
+    );
     transaction.execute(
         "UPDATE jobs SET status = 'failed',
-         error = 'Das LV konnte nicht sicher konvertiert werden. Bitte prüfen Sie das PDF.'
-         WHERE id = ?1",
-        [id],
+         error = ?1
+         WHERE id = ?2",
+        params![user_error, id],
     )?;
     if let Some(email) = refundable_email {
         transaction.execute(

@@ -228,6 +228,21 @@ h1 {
 .billing-banner strong, .billing-banner span { display: block; }
 .billing-banner strong { margin-bottom: 3px; font-size: 13px; }
 .billing-banner div span { color: #6c6259; font-size: 11px; line-height: 1.4; }
+.pro-identity {
+  margin: 0 0 18px;
+  padding: 14px 15px;
+  border: 1px solid rgba(22, 118, 87, 0.25);
+  border-radius: 15px;
+  background: #f1f8f3;
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  gap: 11px;
+  align-items: center;
+}
+.pro-identity[hidden] { display: none; }
+.pro-identity div { display: grid; gap: 2px; }
+.pro-identity div span { color: var(--muted); font-size: 12px; }
+.pro-identity a { color: var(--green); font-size: 12px; font-weight: 800; }
 .billing-credit {
   padding: 7px 9px;
   border: 1px solid rgba(158, 62, 24, 0.18);

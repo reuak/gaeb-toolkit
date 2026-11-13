@@ -11,6 +11,7 @@ const jobMessage = document.querySelector("#job-message");
 const progressBar = document.querySelector("#progress-bar");
 const downloadButton = document.querySelector("#download-button");
 const downloadX84Button = document.querySelector("#download-x84-button");
+const downloadReportButton = document.querySelector("#download-report-button");
 const reviewButton = document.querySelector("#review-button");
 const newJobButton = document.querySelector("#new-job-button");
 const preflightPanel = document.querySelector("#preflight-progress");
@@ -62,6 +63,24 @@ function applyPaidAppearance(status) {
   if (currentCard) currentCard.classList.add("is-current");
 }
 
+async function applyProAccountIdentity() {
+  try {
+    const response = await fetch("/api/account");
+    if (!response.ok) return;
+    const account = await response.json();
+    if (account.plan !== "pro") return;
+    const fields = form.elements;
+    const fallbackName = account.email.split("@")[0];
+    fields.email.value = account.email;
+    fields.contact_name.value = account.billing_address.name || (fallbackName.length >= 2 ? fallbackName : "GAEB Pro Kunde");
+    fields.company.value = account.billing_address.company || "";
+    fields.email.readOnly = true;
+    document.querySelector("#contact-fields").hidden = true;
+    document.querySelector("#pro-identity-email").textContent = account.email;
+    document.querySelector("#pro-identity").hidden = false;
+  } catch (_) {}
+}
+
 async function initializeBilling() {
   const forms = document.querySelectorAll(".checkout-form");
   if (!forms.length) return;
@@ -77,6 +96,7 @@ async function initializeBilling() {
           : `${status.single_credits} Einzelkonvertierung${status.single_credits === 1 ? "" : "en"} verfügbar`;
         document.querySelector("#preise .eyebrow").textContent = label;
         applyPaidAppearance(status);
+        if (status.plan === "pro") await applyProAccountIdentity();
       }
     }
     const response = await fetch("/api/billing/config");
@@ -308,6 +328,7 @@ async function pollJob(id, token) {
       const options = data.download_options || [];
       const x83 = options.find((option) => option.format === "x83");
       const x84 = options.find((option) => option.format === "x84");
+      const report = options.find((option) => option.format === "report");
       jobTitle.textContent = x84 ? "Ihre X83 und X84 sind bereit." : "Ihre X83 ist bereit.";
       jobMessage.textContent = x84
         ? "Die X83 enthält die Ausschreibung ohne Preise; die X84 übernimmt die erkannten Angebotspreise."
@@ -321,7 +342,30 @@ async function pollJob(id, token) {
         downloadX84Button.textContent = x84.label;
         downloadX84Button.hidden = false;
       }
+      if (report) {
+        downloadReportButton.href = report.url;
+        downloadReportButton.hidden = false;
+      }
       if (document.body.classList.contains("billing-active")) { reviewButton.href = `/review.html?job_id=${encodeURIComponent(id)}`; reviewButton.hidden = false; }
+      newJobButton.hidden = false;
+      return;
+    }
+    if (data.status === "ready_with_warnings") {
+      spinner.className = "spinner is-done";
+      jobKicker.textContent = "Prüfpflichtiger Entwurf erstellt";
+      jobTitle.textContent = "Die vereinfachte X83 ist zum Download bereit.";
+      jobMessage.textContent = data.error || "Bitte prüfen Sie die Datei vor der Weiterverarbeitung fachlich.";
+      progressBar.style.width = "100%";
+      const options = data.download_options || [];
+      const x83 = options.find((option) => option.format === "x83");
+      const report = options.find((option) => option.format === "report");
+      downloadButton.href = x83?.url || data.download_url;
+      downloadButton.textContent = "Prüfpflichtige X83 herunterladen";
+      downloadButton.hidden = false;
+      if (report) {
+        downloadReportButton.href = report.url;
+        downloadReportButton.hidden = false;
+      }
       newJobButton.hidden = false;
       return;
     }
@@ -374,6 +418,8 @@ function showJobError(message) {
   downloadButton.removeAttribute("href");
   downloadX84Button.hidden = true;
   downloadX84Button.removeAttribute("href");
+  downloadReportButton.hidden = true;
+  downloadReportButton.removeAttribute("href");
   spinner.className = "spinner is-error";
   jobKicker.textContent = "Konvertierung nicht möglich";
   jobTitle.textContent = "Das PDF muss geprüft werden.";

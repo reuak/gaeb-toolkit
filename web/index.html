@@ -10,9 +10,9 @@
     <meta name="theme-color" content="#f4f2e9" />
     <title>LV Konverter · PDF und GAEB lesbar austauschen</title>
     <link rel="icon" type="image/png" href="/assets/gaeb-konverter-icon.png?v=2" />
-    <link rel="stylesheet" href="/styles.css?v=19" />
+    <link rel="stylesheet" href="/styles.css?v=20" />
     <script src="/offer.js?v=4" defer></script>
-    <script src="/app.js?v=18" defer></script>
+    <script src="/app.js?v=19" defer></script>
     <script src="/consent.js?v=3" defer></script>
   </head>
   <body>
@@ -82,7 +82,13 @@
               <span class="file-meta" id="file-meta">Maximal 2 MB</span>
             </label>
 
-            <div class="field-grid">
+            <div class="pro-identity" id="pro-identity" hidden>
+              <span class="billing-check" aria-hidden="true">✓</span>
+              <div><strong>Als GAEB-Pro-Kunde angemeldet</strong><span id="pro-identity-email"></span></div>
+              <a href="/konto.html">Kundenkonto</a>
+            </div>
+
+            <div class="field-grid" id="contact-fields">
               <label>
                 <span>Name *</span>
                 <input name="contact_name" autocomplete="name" required maxlength="120" />
@@ -113,9 +119,11 @@
             <label class="consent consent-optional">
               <input name="email_fallback_consent" type="checkbox" />
               <span>
-                Falls kein sicherer Export möglich ist: Ich möchte das Original-PDF,
-                einen ausdrücklich prüfpflichtigen X83-Entwurf und das Fehlerprotokoll
-                per E-Mail erhalten. Dafür dürfen die Auftragsdaten bis zu 30 Tage
+                Falls kein sicherer Export möglich ist: Ich erlaube ausdrücklich eine
+                vereinfachte, prüfpflichtige X83-Konvertierung. Der Entwurf und das
+                Fehlerprotokoll werden zum Download bereitgestellt und können zusätzlich
+                per E-Mail versendet werden. Nur ein erfolgreich erzeugter Prüfentwurf
+                zählt als Konvertierung. Die Auftragsdaten dürfen dafür bis zu 30 Tage
                 zur Diagnose gespeichert werden.
               </span>
             </label>
@@ -160,6 +168,9 @@
             <a class="download-button" id="download-button" hidden> X83 herunterladen </a>
             <a class="download-button download-button-priced" id="download-x84-button" hidden>
               X84 mit Preisen herunterladen
+            </a>
+            <a class="secondary-button" id="download-report-button" hidden>
+              Fehlerprotokoll herunterladen
             </a>
             <a class="secondary-button" id="review-button" hidden>Konvertierung bewerten</a>
             <button class="secondary-button" id="new-job-button" type="button" hidden>
