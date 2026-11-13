@@ -12,6 +12,8 @@ const progressBar = document.querySelector("#progress-bar");
 const downloadButton = document.querySelector("#download-button");
 const downloadX84Button = document.querySelector("#download-x84-button");
 const downloadReportButton = document.querySelector("#download-report-button");
+const acceptReviewExportButton = document.querySelector("#accept-review-export-button");
+const acceptReviewExportNote = document.querySelector("#accept-review-export-note");
 const reviewButton = document.querySelector("#review-button");
 const newJobButton = document.querySelector("#new-job-button");
 const preflightPanel = document.querySelector("#preflight-progress");
@@ -24,6 +26,7 @@ const conversionLimitAlert = document.querySelector("#conversion-limit-alert");
 let activeUploadController = null;
 let preflightTimer = null;
 let pdfUploadLimit = 2 * 1024 * 1024;
+let reviewExportJob = null;
 
 document.querySelector("#year").textContent = new Date().getFullYear();
 
@@ -385,7 +388,12 @@ async function pollJob(id, token) {
       return;
     }
     if (data.status === "failed") {
-      showJobError(data.error || "Das LV konnte nicht konvertiert werden.");
+      showJobError(
+        data.error || "Das LV konnte nicht konvertiert werden.",
+        data.review_export_available,
+        id,
+        token,
+      );
       return;
     }
     ticks += 1;
@@ -411,7 +419,7 @@ function showError(message) {
   fileMeta.style.color = "var(--error)";
 }
 
-function showJobError(message) {
+function showJobError(message, reviewExportAvailable = false, id = null, token = null) {
   form.hidden = true;
   jobPanel.hidden = false;
   downloadButton.hidden = true;
@@ -420,14 +428,51 @@ function showJobError(message) {
   downloadX84Button.removeAttribute("href");
   downloadReportButton.hidden = true;
   downloadReportButton.removeAttribute("href");
+  reviewExportJob = reviewExportAvailable ? { id, token } : null;
+  acceptReviewExportButton.hidden = !reviewExportAvailable;
+  acceptReviewExportNote.hidden = !reviewExportAvailable;
   spinner.className = "spinner is-error";
-  jobKicker.textContent = "Konvertierung nicht möglich";
-  jobTitle.textContent = "Das PDF muss geprüft werden.";
+  jobKicker.textContent = reviewExportAvailable ? "Sicherer Export blockiert" : "Konvertierung nicht möglich";
+  jobTitle.textContent = reviewExportAvailable
+    ? "Ein prüfpflichtiger X83-Entwurf ist verfügbar."
+    : "Das PDF muss geprüft werden.";
   jobMessage.textContent = message;
   progressBar.style.width = "100%";
   progressBar.style.background = "#a53e35";
   newJobButton.hidden = false;
 }
+
+acceptReviewExportButton.addEventListener("click", async () => {
+  if (!reviewExportJob) return;
+  acceptReviewExportButton.disabled = true;
+  acceptReviewExportButton.textContent = "Prüfentwurf wird freigegeben …";
+  try {
+    const { id, token } = reviewExportJob;
+    const response = await fetch(
+      `/api/jobs/${encodeURIComponent(id)}/accept-review-export?token=${encodeURIComponent(token)}`,
+      { method: "POST" },
+    );
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.error || "Der Prüfentwurf konnte nicht freigegeben werden.");
+    }
+    reviewExportJob = null;
+    acceptReviewExportButton.hidden = true;
+    acceptReviewExportNote.hidden = true;
+    newJobButton.hidden = true;
+    spinner.className = "spinner";
+    jobKicker.textContent = "Prüfentwurf wird freigegeben";
+    jobTitle.textContent = "Download wird vorbereitet.";
+    jobMessage.textContent = "Die Freigabe wird als eine Pro-Konvertierung erfasst.";
+    progressBar.style.background = "";
+    progressBar.style.width = "70%";
+    await pollJob(id, token);
+  } catch (error) {
+    jobMessage.textContent = error.message;
+    acceptReviewExportButton.disabled = false;
+    acceptReviewExportButton.textContent = "Prüfpflichtige X83 trotzdem freigeben und herunterladen";
+  }
+});
 
 newJobButton.addEventListener("click", () => {
   window.location.reload();

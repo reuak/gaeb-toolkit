@@ -128,6 +128,7 @@ struct JobStatusResponse {
     error: Option<String>,
     download_url: Option<String>,
     download_options: Vec<DownloadOption>,
+    review_export_available: bool,
     expires_at: String,
 }
 
@@ -486,6 +487,10 @@ async fn main() -> Result<()> {
         .route("/api/stripe/webhook", post(stripe_webhook))
         .route("/billing/access/{token}", get(activate_billing_access))
         .route("/api/jobs/{id}", get(job_status))
+        .route(
+            "/api/jobs/{id}/accept-review-export",
+            post(accept_review_export),
+        )
         .route("/download/{id}/{token}", get(download))
         .route("/download/{id}/{token}/{format}", get(download_format))
         .route("/testlabor.html", get(test_lab_page))
@@ -2782,6 +2787,27 @@ async fn job_status(
         .map_err(|_| ApiError::internal())?
         .ok_or_else(|| ApiError::not_found("Auftrag nicht gefunden."))?;
     let downloadable = matches!(record.status.as_str(), "ready" | "ready_with_warnings");
+    let review_export_available = record.status == "failed"
+        && record.billing_tier == "pro"
+        && !record.email_fallback_consent
+        && fs::try_exists(
+            state
+                .data_dir
+                .join("jobs")
+                .join(&record.id)
+                .join("output.x83"),
+        )
+        .await
+        .unwrap_or(false)
+        && fs::try_exists(
+            state
+                .data_dir
+                .join("jobs")
+                .join(&record.id)
+                .join("fehlerprotokoll.txt"),
+        )
+        .await
+        .unwrap_or(false);
     let download_url = downloadable.then(|| format!("/download/{}/{}", record.id, record.token));
     let mut download_options = Vec::new();
     if downloadable {
@@ -2817,8 +2843,84 @@ async fn job_status(
         error: record.error,
         download_url,
         download_options,
+        review_export_available,
         expires_at: record.expires_at,
     }))
+}
+
+async fn accept_review_export(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<StatusCode, ApiError> {
+    let token = query
+        .get("token")
+        .ok_or_else(|| ApiError::not_found("Auftrag nicht gefunden."))?;
+    let record = load_job(&state, &id, token)
+        .map_err(|_| ApiError::internal())?
+        .ok_or_else(|| ApiError::not_found("Auftrag nicht gefunden."))?;
+    if record.status == "ready_with_warnings" && record.email_fallback_consent {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    if record.billing_tier != "pro" || record.status != "failed" || record.email_fallback_consent {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "Der prüfpflichtige Export kann für diesen Auftrag nicht freigegeben werden.",
+        ));
+    }
+    let job_dir = state.data_dir.join("jobs").join(&id);
+    if !fs::try_exists(job_dir.join("output.x83"))
+        .await
+        .unwrap_or(false)
+        || !fs::try_exists(job_dir.join("fehlerprotokoll.txt"))
+            .await
+            .unwrap_or(false)
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "Für diesen Auftrag ist kein prüfpflichtiger Entwurf verfügbar.",
+        ));
+    }
+    let mut connection = Connection::open(&state.db_path).map_err(|_| ApiError::internal())?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| ApiError::internal())?;
+    let jobs_this_month: u32 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM jobs WHERE email=?1 AND billing_tier='pro' AND status!='failed'
+             AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')",
+            [&record.email],
+            |row| row.get(0),
+        )
+        .map_err(|_| ApiError::internal())?;
+    let direct_this_month: u32 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM conversion_usage WHERE email=?1 AND billing_tier='pro'
+             AND strftime('%Y-%m',created_at)=strftime('%Y-%m','now')",
+            [&record.email],
+            |row| row.get(0),
+        )
+        .map_err(|_| ApiError::internal())?;
+    if jobs_this_month.saturating_add(direct_this_month) >= 100 {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Das Pro-Monatskontingent von 100 Konvertierungen ist erreicht.",
+        ));
+    }
+    let now = Utc::now().to_rfc3339();
+    let expires_at =
+        (Utc::now() + ChronoDuration::days(state.diagnostic_retention_days)).to_rfc3339();
+    transaction
+        .execute(
+            "UPDATE jobs SET status='ready_with_warnings', email_fallback_consent=1,
+                    email_fallback_consent_at=?1, expires_at=?2,
+                    error='Der sichere Export war nicht möglich. Sie haben den vorhandenen vereinfachten, ausdrücklich prüfpflichtigen X83-Entwurf freigegeben. Bitte beachten Sie das Fehlerprotokoll.'
+             WHERE id=?3 AND status='failed' AND email_fallback_consent=0",
+            params![now, expires_at, id],
+        )
+        .map_err(|_| ApiError::internal())?;
+    transaction.commit().map_err(|_| ApiError::internal())?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn download(
@@ -2940,7 +3042,7 @@ async fn process_job(
                 }
                 Ok(false)
             }
-            Err(error) if record.email_fallback_consent => {
+            Err(error) => {
                 write_x83(&boq, &processing_output, true)?;
                 if std::env::var("DOLIBARR_COMPATIBLE_X83").as_deref() != Ok("true") {
                     inject_pdf_pngs(&processing_input, &processing_output, &boq)?;
@@ -2954,6 +3056,9 @@ async fn process_job(
                      weiteren Verwendung fachlich geprüft werden.\n\n{error}\n"
                 );
                 std::fs::write(&processing_report, &report_text)?;
+                if !record.email_fallback_consent {
+                    return Err(error);
+                }
                 if let Some(smtp) = smtp {
                     let _ = send_fallback_email(
                         &smtp,
@@ -2965,7 +3070,6 @@ async fn process_job(
                 }
                 Ok(true)
             }
-            Err(error) => Err(error),
         }
     })
     .await??;
@@ -3444,7 +3548,7 @@ fn set_job_failed(state: &AppState, id: &str, technical_error: &str) -> Result<(
         .optional()?;
     let detail = technical_error.chars().take(1500).collect::<String>();
     let user_error = format!(
-        "Der sichere Export wurde abgebrochen: {detail} Aktivieren Sie vor einem neuen Versuch die Option für eine vereinfachte, prüfpflichtige X83-Konvertierung. Eine fehlgeschlagene Konvertierung wird nicht auf das Kontingent angerechnet."
+        "Der sichere Export wurde abgebrochen: {detail} Sie können den bereits erzeugten prüfpflichtigen Entwurf anschließend ausdrücklich freigeben und herunterladen. Erst diese Freigabe wird auf das Pro-Kontingent angerechnet."
     );
     transaction.execute(
         "UPDATE jobs SET status = 'failed',
