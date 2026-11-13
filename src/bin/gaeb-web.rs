@@ -22,8 +22,9 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use gaeb_toolkit::{
-    apply_provisional_flags, gaeb_document_to_boq, inject_pdf_pngs, parse_pdf, read_gaeb,
-    write_d84, write_gaeb_pdf, write_p84, write_x83, write_x84,
+    apply_provisional_flags, gaeb_document_to_boq, inject_pdf_pngs, parse_pdf,
+    parse_pdf_with_ocr_retry, read_gaeb, write_d84, write_gaeb_pdf, write_p84, write_x83,
+    write_x84,
 };
 use hmac::{Hmac, Mac};
 use lettre::{
@@ -379,6 +380,7 @@ struct JobRecord {
 
 struct BillingAccess {
     email: String,
+    pro_active: bool,
 }
 
 struct PurchaseNotice {
@@ -2652,6 +2654,9 @@ async fn create_job(
 
     let access = billing_access_from_headers(&state, &headers).map_err(|_| ApiError::internal())?;
     let has_paid_access = access.is_some();
+    let has_pro_ocr_access = access
+        .as_ref()
+        .is_some_and(|billing_access| billing_access.pro_active);
     validate_form(&form, &state, access.as_ref())?;
     let id = Uuid::new_v4().simple().to_string();
     let token = Uuid::new_v4().simple().to_string();
@@ -2667,7 +2672,9 @@ async fn create_job(
     // Die fachliche Vorprüfung läuft vor jeder Credit-Reservierung. So kostet
     // ein Scan ohne Textebene oder ein fachfremdes PDF keinen Einzel-Credit.
     let preflight_path = input_path.clone();
-    let preflight = task::spawn_blocking(move || parse_pdf(&preflight_path))
+    let preflight = task::spawn_blocking(move || {
+        parse_pdf_with_ocr_retry(&preflight_path, has_pro_ocr_access)
+    })
         .await
         .map_err(|_| ApiError::internal())?
         .map_err(|error| {
@@ -2686,9 +2693,12 @@ async fn create_job(
     let detected_positions = count_positions(&preflight.roots);
     if detected_positions == 0 {
         let _ = fs::remove_dir_all(&job_dir).await;
-        return Err(ApiError::unprocessable(
-            "Vorprüfung: Keine Ordnungszahlen oder LV-Positionen gefunden. Das PDF ist möglicherweise nur eingescannt, enthält keine Textebene oder ist kein GAEB-artiges Leistungsverzeichnis. Es wurde kein Credit verwendet. Bitte prüfen Sie die Datei oder laden Sie eine OCR-/durchsuchbare PDF hoch.",
-        ));
+        let message = if has_pro_ocr_access {
+            "Vorprüfung einschließlich deutscher Pro-OCR: Keine Ordnungszahlen oder LV-Positionen gefunden. Es wurde kein Kontingent verwendet. Bitte prüfen Sie, ob die Datei ein strukturiertes Leistungsverzeichnis enthält."
+        } else {
+            "Vorprüfung: Keine Ordnungszahlen oder LV-Positionen gefunden. Die Datei enthält möglicherweise nur teilweise eine Textebene. Das Pro-Modul kann in diesem Fall alle Seiten mit deutscher OCR erneut auswerten. Es wurde keine Freikonvertierung verwendet."
+        };
+        return Err(ApiError::unprocessable(message));
     }
     let detected_sections = count_named_sections(&preflight.roots);
     if detected_positions <= 10 && detected_sections == 0 && !form.confirm_structure {
@@ -3781,9 +3791,17 @@ fn billing_access_from_headers(
     let connection = Connection::open(&state.db_path)?;
     connection
         .query_row(
-            "SELECT email FROM billing_sessions WHERE session_hash = ?1 AND expires_at > ?2",
+            "SELECT billing_sessions.email, COALESCE(billing_accounts.pro_active, 0)
+             FROM billing_sessions
+             LEFT JOIN billing_accounts ON billing_accounts.email = billing_sessions.email
+             WHERE billing_sessions.session_hash = ?1 AND billing_sessions.expires_at > ?2",
             params![hash_token(&raw_session), Utc::now().to_rfc3339()],
-            |row| Ok(BillingAccess { email: row.get(0)? }),
+            |row| {
+                Ok(BillingAccess {
+                    email: row.get(0)?,
+                    pro_active: row.get(1)?,
+                })
+            },
         )
         .optional()
         .map_err(Into::into)
@@ -4050,8 +4068,7 @@ fn stripe_config() -> Option<StripeConfig> {
     let pro_yearly_price_id = required_env("STRIPE_PRO_YEARLY_PRICE_ID");
     let public_base_url = required_env("PUBLIC_BASE_URL")?;
     let supported_secret_key = secret_key.starts_with("sk_") || secret_key.starts_with("rk_");
-    let test_secret_key =
-        secret_key.starts_with("sk_test_") || secret_key.starts_with("rk_test_");
+    let test_secret_key = secret_key.starts_with("sk_test_") || secret_key.starts_with("rk_test_");
     let local_test_url = test_secret_key
         && (public_base_url.starts_with("http://localhost:")
             || public_base_url.starts_with("http://127.0.0.1:"));

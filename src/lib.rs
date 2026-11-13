@@ -53,6 +53,17 @@ pub use priced_export::{write_x83_priced, write_x84};
 pub use provisional_xml::apply_provisional_flags;
 
 pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
+    parse_pdf_with_ocr_retry(path, false)
+}
+
+/// Liest ein PDF und kann bei einer vorhandenen, aber fachlich unbrauchbaren
+/// Textebene zusätzlich eine vollständige OCR ausführen. Der normale Parser
+/// bleibt bewusst günstig; der zweite, rechenintensive Durchlauf ist für den
+/// Pro-Webzugang und Integrationen vorgesehen.
+pub fn parse_pdf_with_ocr_retry(
+    path: impl AsRef<Path>,
+    retry_unstructured_with_ocr: bool,
+) -> anyhow::Result<BillOfQuantities> {
     let path = path.as_ref();
 
     // Der Layouttext wird vom Hauptparser, von der Platzhalter-OZ-Erkennung und
@@ -81,23 +92,42 @@ pub fn parse_pdf(path: impl AsRef<Path>) -> anyhow::Result<BillOfQuantities> {
         .and_then(|value| value.to_str())
         .unwrap_or("input.pdf");
 
-    let mut boq = if compact_lv::looks_like_compact_lv(&text) {
-        compact_lv::parse_compact_lv(source, &text)?
-    } else {
-        parser::parse_text(source, &text)?
-    };
+    let mut boq = parse_pdf_text(path, source, &text)?;
     if ocr_used {
         boq.warnings.push(
             "OCR-Vorprüfung verwendet: Das PDF enthielt keine ausreichende Textebene.".to_owned(),
         );
+    } else if retry_unstructured_with_ocr && count_node_positions(&boq.roots) == 0 {
+        let ocr_text = ocr_pdf_text(path)?;
+        boq = parse_pdf_text(path, source, &ocr_text)?;
+        boq.warnings.push(
+            "OCR-Pro-Modul verwendet: Die vorhandene Textebene enthielt keine erkennbaren LV-Positionen."
+                .to_owned(),
+        );
     }
-    placeholder_oz::recover_placeholder_positions_from_text(&text, &mut boq)?;
+    Ok(boq)
+}
+
+fn parse_pdf_text(path: &Path, source: &str, text: &str) -> anyhow::Result<BillOfQuantities> {
+    let mut boq = if compact_lv::looks_like_compact_lv(text) {
+        compact_lv::parse_compact_lv(source, &text)?
+    } else {
+        parser::parse_text(source, &text)?
+    };
+    placeholder_oz::recover_placeholder_positions_from_text(text, &mut boq)?;
     reference_cleanup::repair_split_references(&mut boq);
     pdf_cleanup::postprocess_pdf(path, &mut boq)?;
     title_cleanup::clean_titles(&mut boq.roots);
     price_cleanup::validate_and_repair_prices(&mut boq);
-    provisional_validation::validate_provisional_totals(&text, &mut boq);
+    provisional_validation::validate_provisional_totals(text, &mut boq);
     Ok(boq)
+}
+
+fn count_node_positions(nodes: &[Node]) -> usize {
+    nodes
+        .iter()
+        .map(|node| node.positions.len() + count_node_positions(&node.children))
+        .sum()
 }
 
 fn ocr_pdf_text(path: &Path) -> anyhow::Result<String> {
